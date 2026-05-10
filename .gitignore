@@ -1,0 +1,19 @@
+# Roblox y Rojo
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+
+# Rokit y Aftman
+.rokit/
+.aftman/
+!rokit.toml
+!aftman.toml
+
+# Logs de Studio
+*.log
+
+# Archivos de OS y Editores
+.DS_Store
+.vscode/
+.idea/

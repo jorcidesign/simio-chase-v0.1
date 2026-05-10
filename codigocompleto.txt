@@ -1,0 +1,184 @@
+
+========== ARCHIVO: ./rokit.toml ==========
+
+# This file lists tools managed by Rokit, a toolchain manager for Roblox projects.
+# For more information, see https://github.com/rojo-rbx/rokit
+
+# New tools can be added by running `rokit add <tool>` in a terminal.
+
+[tools]
+rojo = "rojo-rbx/rojo@7.6.1"
+
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/MatchUIController.lua ==========
+
+
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/InputController.lua ==========
+
+
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/CameraController.lua ==========
+
+
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Network/ClientEventBus.lua ==========
+
+
+========== ARCHIVO: ./src/ReplicatedStorage/Utils/MathUtils.lua ==========
+
+
+========== ARCHIVO: ./src/ReplicatedStorage/Packages/Signal.lua ==========
+
+-- src/ReplicatedStorage/Packages/Signal.lua
+-- Implementación robusta y tipada de Signals para Asto Studio
+local Signal = {}
+Signal.__index = Signal
+
+-- Constructor
+function Signal.new()
+    local self = setmetatable({
+        _bindable = Instance.new("BindableEvent"),
+        _connections = {}
+    }, Signal)
+    return self
+end
+
+-- Conectar una función al evento
+function Signal:Connect(handler: (...any) -> ())
+    local connection = self._bindable.Event:Connect(function(...)
+        handler(...)
+    end)
+    table.insert(self._connections, connection)
+    return connection
+end
+
+-- Disparar el evento con cualquier cantidad de argumentos
+function Signal:Fire(...)
+    self._bindable:Fire(...)
+end
+
+-- Destruir el evento y limpiar memoria (¡Súper importante para evitar Memory Leaks!)
+function Signal:Destroy()
+    for _, connection in ipairs(self._connections) do
+        connection:Disconnect()
+    end
+    table.clear(self._connections)
+    self._bindable:Destroy()
+end
+
+return Signal
+========== ARCHIVO: ./src/ReplicatedStorage/Enums/StatusEffects.lua ==========
+
+
+========== ARCHIVO: ./src/ReplicatedStorage/Enums/GameState.lua ==========
+
+
+========== ARCHIVO: ./src/ReplicatedStorage/Models/SkillModel.lua ==========
+
+
+========== ARCHIVO: ./src/ServerScriptService/Data/GameConstants.lua ==========
+
+
+========== ARCHIVO: ./src/ServerScriptService/Data/CharacterConfigs/VACUMING.lua ==========
+
+
+========== ARCHIVO: ./src/ServerScriptService/Data/CharacterConfigs/PORO.lua ==========
+
+xd xd 
+========== ARCHIVO: ./src/ServerScriptService/Systems/DamageSystem.lua ==========
+
+
+========== ARCHIVO: ./src/ServerScriptService/Systems/StatusEffectSystem.lua ==========
+
+
+========== ARCHIVO: ./src/ServerScriptService/Services/CombatService.lua ==========
+
+
+========== ARCHIVO: ./src/ServerScriptService/Services/MatchManagerService.lua ==========
+
+-- src/ServerScriptService/Services/MatchManagerService.lua
+local ServerScriptService = game:GetService("ServerScriptService")
+local ServerEventBus = require(ServerScriptService.Network.ServerEventBus)
+
+local MatchManagerService = {}
+
+function MatchManagerService.Start()
+    print("🎮 [MatchManager] Iniciado. Empezando a enviar pings...")
+    
+    -- Creamos un hilo paralelo para no bloquear el juego
+    task.spawn(function()
+        local contador = 1
+        while true do
+            task.wait(2) -- Espera 2 segundos
+            -- Disparamos el evento pasando argumentos
+            ServerEventBus.TestPing:Fire("Hola desde MatchManager", contador)
+            contador += 1
+        end
+    end)
+end
+
+return MatchManagerService
+========== ARCHIVO: ./src/ServerScriptService/Services/TimeManagerService.lua ==========
+
+-- src/ServerScriptService/Services/TimeManagerService.lua
+local ServerScriptService = game:GetService("ServerScriptService")
+local ServerEventBus = require(ServerScriptService.Network.ServerEventBus)
+
+local TimeManagerService = {}
+
+function TimeManagerService.Start()
+    print("⏳ [TimeManager] Iniciado. Esperando pings...")
+    
+    -- Nos conectamos al evento
+    ServerEventBus.TestPing:Connect(function(mensaje, contador)
+        print("🏓 [TimeManager] ¡Pong! Recibí el mensaje: '" .. mensaje .. "' | Número: " .. contador)
+    end)
+end
+
+return TimeManagerService
+========== ARCHIVO: ./src/ServerScriptService/Services/SkillManagerService.lua ==========
+
+
+========== ARCHIVO: ./src/ServerScriptService/Network/ServerEventBus.lua ==========
+
+-- src/ServerScriptService/Network/ServerEventBus.lua
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Signal = require(ReplicatedStorage.Packages.Signal)
+
+local ServerEventBus = {
+    -- Creamos un evento de prueba
+    TestPing = Signal.new()
+}
+
+return ServerEventBus
+========== ARCHIVO: ./src/ServerScriptService/ServerMain.server.lua ==========
+
+-- src/ServerScriptService/ServerMain.server.lua
+local Services = script.Parent.Services
+
+local TimeManagerService = require(Services.TimeManagerService)
+local MatchManagerService = require(Services.MatchManagerService)
+
+print("🚀 Arrancando Servidor de Simio Chase v0.1...")
+
+-- Iniciamos los servicios (el orden importa si uno depende del otro)
+TimeManagerService.Start()
+MatchManagerService.Start()
+
+print("✅ Servidor inicializado con éxito.")
+========== ARCHIVO: ./default.project.json ==========
+
+{
+    "name": "SimioChase_v0.1",
+    "tree": {
+        "$className": "DataModel",
+        "ServerScriptService": {
+            "$path": "src/ServerScriptService"
+        },
+        "StarterPlayer": {
+            "StarterPlayerScripts": {
+                "$path": "src/StarterPlayer/StarterPlayerScripts"
+            }
+        },
+        "ReplicatedStorage": {
+            "$path": "src/ReplicatedStorage"
+        }
+    }
+}

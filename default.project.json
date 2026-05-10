@@ -1,0 +1,17 @@
+{
+    "name": "SimioChase_v0.1",
+    "tree": {
+        "$className": "DataModel",
+        "ServerScriptService": {
+            "$path": "src/ServerScriptService"
+        },
+        "StarterPlayer": {
+            "StarterPlayerScripts": {
+                "$path": "src/StarterPlayer/StarterPlayerScripts"
+            }
+        },
+        "ReplicatedStorage": {
+            "$path": "src/ReplicatedStorage"
+        }
+    }
+}
