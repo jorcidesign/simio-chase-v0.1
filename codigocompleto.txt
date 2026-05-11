@@ -21,73 +21,1917 @@ rojo = "rojo-rbx/rojo@7.6.1"
 ========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Network/ClientEventBus.lua ==========
 
 
+========== ARCHIVO: ./src/ReplicatedStorage/Utils/ValidationUtils.lua ==========
+
+-- =============================================================================
+-- ValidationUtils.lua
+-- Ubicación: src/shared/utils/ValidationUtils.lua
+--
+-- Funciones puras de validación. Usadas principalmente en el servidor
+-- para sanear todos los datos recibidos por RemoteEvents.
+--
+-- Principio SOLID: Single Responsibility
+-- Sin dependencias externas — completamente portátil.
+-- =============================================================================
+
+local ValidationUtils = {}
+
+-- Tolerancia de cooldown: ms que se permiten de diferencia entre cliente y servidor
+local COOLDOWN_TOLERANCE_MS = 100
+
+--- Verifica si un valor es una string no vacía.
+function ValidationUtils.isValidString(value: any): boolean
+	return type(value) == "string" and #value > 0
+end
+
+--- Verifica si un Vector3 tiene componentes finitas y dentro de los límites del mapa.
+--- @param mapRadius  Radio máximo permitido desde el origen (por defecto 5000 studs)
+function ValidationUtils.isValidPosition(pos: any, mapRadius: number?): boolean
+	if typeof(pos) ~= "Vector3" then return false end
+	local r = mapRadius or 5000
+	if pos.X ~= pos.X or pos.Y ~= pos.Y or pos.Z ~= pos.Z then return false end -- NaN check
+	return math.abs(pos.X) <= r and math.abs(pos.Y) <= 1000 and math.abs(pos.Z) <= r
+end
+
+--- Verifica que un characterId sea conocido en un diccionario de configs.
+function ValidationUtils.isValidCharacterId(id: any, registry: table): boolean
+	return ValidationUtils.isValidString(id) and registry[id] ~= nil
+end
+
+--- Verifica que un jugador tenga suficiente estamina para una acción.
+function ValidationUtils.hasEnoughStamina(current: number, cost: number): boolean
+	return current >= cost
+end
+
+--- Verifica que un cooldown haya expirado (con tolerancia de red).
+--- @param lastUsed   os.clock() cuando se usó la habilidad por última vez
+--- @param cooldown   cooldown en segundos definido en el config
+function ValidationUtils.isCooldownReady(lastUsed: number, cooldown: number): boolean
+	local elapsed    = os.clock() - lastUsed
+	local tolerance  = COOLDOWN_TOLERANCE_MS / 1000
+	return elapsed >= (cooldown - tolerance)
+end
+
+--- Verifica que un player tenga su personaje vivo en el servidor.
+function ValidationUtils.isCharacterAlive(player: Player): boolean
+	local char = player.Character
+	if not char then return false end
+	local hum = char:FindFirstChild("Humanoid")
+	return hum ~= nil and hum.Health > 0
+end
+
+--- Verifica que dos posiciones estén dentro de un rango máximo.
+--- Útil para evitar teleports de trampa donde el cliente manda una posición lejana.
+function ValidationUtils.isInRange(origin: Vector3, target: Vector3, maxRange: number): boolean
+	return (target - origin).Magnitude <= maxRange * 1.15  -- 15% de tolerancia de lag
+end
+
+--- Verifica que un tag (StringValue / BoolValue) exista en un personaje.
+function ValidationUtils.characterHasTag(char: Model, tagName: string): boolean
+	return char:FindFirstChild(tagName) ~= nil
+end
+
+--- Verifica que un player no esté stunned.
+function ValidationUtils.isNotStunned(char: Model): boolean
+	return char:FindFirstChild("IsStunned") == nil
+end
+
+return ValidationUtils
 ========== ARCHIVO: ./src/ReplicatedStorage/Utils/MathUtils.lua ==========
 
 
 ========== ARCHIVO: ./src/ReplicatedStorage/Packages/Signal.lua ==========
 
--- src/ReplicatedStorage/Packages/Signal.lua
--- Implementación robusta y tipada de Signals para Asto Studio
+-- =============================================================================
+-- Signal.lua
+-- Ubicación: src/shared/packages/Signal.lua
+--
+-- Implementación del patrón Observer. Reemplaza el uso directo de
+-- BindableEvents y desacopla completamente emisores de receptores.
+--
+-- Patrón: Observer / Event Emitter
+-- Principio SOLID: Dependency Inversion (módulos dependen de esta abstracción)
+-- =============================================================================
+
+-- Tipos Luau para autocompletado y seguridad de tipos
+export type Connection = {
+	Disconnect: (self: Connection) -> (),
+	Connected: boolean,
+}
+
+export type Signal<T...> = {
+	Connect: (self: Signal<T...>, handler: (T...) -> ()) -> Connection,
+	Once: (self: Signal<T...>, handler: (T...) -> ()) -> Connection,
+	Fire: (self: Signal<T...>, T...) -> (),
+	Wait: (self: Signal<T...>) -> T...,
+	Destroy: (self: Signal<T...>) -> (),
+}
+
+-- ---------------------------------------------------------------------------
+-- Implementación interna de Connection
+-- ---------------------------------------------------------------------------
+local Connection = {}
+Connection.__index = Connection
+
+function Connection.new(signal: any, handler: (...any) -> ()): Connection
+	return setmetatable({
+		_signal  = signal,
+		_handler = handler,
+		Connected = true,
+	}, Connection)
+end
+
+function Connection:Disconnect()
+	if not self.Connected then return end
+	self.Connected = false
+
+	local connections = self._signal._connections
+	for i, conn in ipairs(connections) do
+		if conn == self then
+			table.remove(connections, i)
+			break
+		end
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- Implementación de Signal
+-- ---------------------------------------------------------------------------
 local Signal = {}
 Signal.__index = Signal
 
--- Constructor
-function Signal.new()
-    local self = setmetatable({
-        _bindable = Instance.new("BindableEvent"),
-        _connections = {}
-    }, Signal)
-    return self
+--- Constructor. Crea un nuevo Signal vacío.
+function Signal.new(): Signal<...any>
+	return setmetatable({
+		_connections = {} :: {Connection},
+		_thread      = nil :: thread?,
+	}, Signal)
 end
 
--- Conectar una función al evento
-function Signal:Connect(handler: (...any) -> ())
-    local connection = self._bindable.Event:Connect(function(...)
-        handler(...)
-    end)
-    table.insert(self._connections, connection)
-    return connection
+--- Conecta un handler que se ejecuta cada vez que se dispara el Signal.
+--- @return Connection  Guarda la conexión para desconectarla posteriormente.
+function Signal:Connect(handler: (...any) -> ()): Connection
+	assert(type(handler) == "function", "[Signal] Connect espera una función")
+
+	local conn = Connection.new(self, handler)
+	table.insert(self._connections, conn)
+	return conn
 end
 
--- Disparar el evento con cualquier cantidad de argumentos
-function Signal:Fire(...)
-    self._bindable:Fire(...)
+--- Conecta un handler que se ejecuta UNA SOLA VEZ y se desconecta solo.
+function Signal:Once(handler: (...any) -> ()): Connection
+	local conn
+	conn = self:Connect(function(...)
+		conn:Disconnect()
+		handler(...)
+	end)
+	return conn
 end
 
--- Destruir el evento y limpiar memoria (¡Súper importante para evitar Memory Leaks!)
+--- Dispara el Signal, ejecutando todos los handlers conectados.
+--- SEGURO: los errores en handlers individuales no rompen los demás.
+function Signal:Fire(...: any)
+	-- Snapshot para evitar mutaciones durante la iteración
+	local snapshot = table.clone(self._connections)
+
+	for _, conn in ipairs(snapshot) do
+		if conn.Connected then
+			local ok, err = pcall(conn._handler, ...)
+			if not ok then
+				warn(string.format("[Signal] Error en handler: %s", tostring(err)))
+			end
+		end
+	end
+
+	-- Despertar cualquier corrutina esperando con :Wait()
+	if self._thread then
+		local thread = self._thread
+		self._thread = nil
+		task.spawn(thread, ...)
+	end
+end
+
+--- Suspende la corrutina actual hasta que el Signal sea disparado.
+--- @return ... Los argumentos con que fue disparado el Signal.
+function Signal:Wait(): ...any
+	self._thread = coroutine.running()
+	return coroutine.yield()
+end
+
+--- Destruye el Signal y limpia todas las conexiones. Llamar al hacer cleanup.
 function Signal:Destroy()
-    for _, connection in ipairs(self._connections) do
-        connection:Disconnect()
-    end
-    table.clear(self._connections)
-    self._bindable:Destroy()
+	for _, conn in ipairs(self._connections) do
+		conn.Connected = false
+	end
+	table.clear(self._connections)
+	self._thread = nil
 end
 
 return Signal
+========== ARCHIVO: ./src/ReplicatedStorage/Network/RemoteRegistry.lua ==========
+
+-- =============================================================================
+-- RemoteRegistry.lua
+-- Ubicación: src/shared/network/RemoteRegistry.lua
+--
+-- Registro centralizado de TODOS los RemoteEvents y RemoteFunctions del juego.
+-- Crea los remotes si no existen, y los retorna listos para usar.
+--
+-- Principio SOLID: Single Responsibility
+-- Elimina la proliferación de getOrCreateEvent() por todo el código.
+-- Un solo lugar para ver TODOS los canales de comunicación cliente-servidor.
+-- =============================================================================
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- ---------------------------------------------------------------------------
+-- Helpers privados
+-- ---------------------------------------------------------------------------
+
+local function getFolder(name: string): Folder
+	local f = ReplicatedStorage:FindFirstChild(name)
+	if not f then
+		f = Instance.new("Folder")
+		f.Name = name
+		f.Parent = ReplicatedStorage
+	end
+	return f
+end
+
+local function getOrCreateRemote(parent: Instance, name: string): RemoteEvent
+	local ev = parent:FindFirstChild(name)
+	if not ev then
+		ev = Instance.new("RemoteEvent")
+		ev.Name = name
+		ev.Parent = parent
+	end
+	return ev
+end
+
+local function getOrCreateBindable(name: string): BindableEvent
+	local ev = ReplicatedStorage:FindFirstChild(name)
+	if not ev then
+		ev = Instance.new("BindableEvent")
+		ev.Name = name
+		ev.Parent = ReplicatedStorage
+	end
+	return ev
+end
+
+-- ---------------------------------------------------------------------------
+-- Construcción del registro
+-- ---------------------------------------------------------------------------
+
+local eventsFolder = getFolder("GameEvents")
+
+--- @class RemoteRegistry
+--- Todos los canales de comunicación tipados.
+local RemoteRegistry = {
+
+	-- =========================================================================
+	-- 🎮 ESTADO DEL JUEGO (Server → Client)
+	-- =========================================================================
+
+	--- Enviado cada segundo. Args: (state: string, timer: number, message: string)
+	UpdateGameState = getOrCreateRemote(eventsFolder, "UpdateGameState"),
+
+	--- Enviado al inicio. Args: (role: "Survivor"|"Killer", characterId: string)
+	AssignRole = getOrCreateRemote(eventsFolder, "AssignRole"),
+
+	--- Avisar a todos que la salida está abierta.
+	ExitOpen = getOrCreateRemote(eventsFolder, "ExitOpen"),
+
+	--- Avisar inicio de LMS. Args: (killerId: string, survivorId: string)
+	LMSStart = getOrCreateRemote(eventsFolder, "LMSStart"),
+
+	-- =========================================================================
+	-- ⚔️ COMBATE (Client → Server y Server → Client)
+	-- =========================================================================
+
+	--- Client → Server: El killer intenta un M1.
+	M1Attack = getOrCreateRemote(eventsFolder, "M1Attack"),
+
+	--- Client → Server: Usar habilidad de killer. Args: (abilityServerName: string, target: Vector3?)
+	UseKillerAbility = getOrCreateRemote(eventsFolder, "UseAbility"),
+
+	--- Client → Server: Usar habilidad de survivor. Args: (abilityServerName: string, targetPos: Vector3?)
+	UseSurvivorAbility = getOrCreateRemote(eventsFolder, "UseSurvivorAbility"),
+
+	--- Server → Client: Confirmar daño recibido (flash de pantalla roja).
+	DamageEffect = getOrCreateRemote(eventsFolder, "DamageEffect"),
+
+	--- Server → Client: Aplicar efecto de stun en UI. Args: (duration: number)
+	StunEffect = getOrCreateRemote(eventsFolder, "StunEffect"),
+
+	--- Server → Client: Cegar al killer. Args: (duration: number)
+	BlindKiller = getOrCreateRemote(eventsFolder, "eventBlindKiller"),
+
+	--- Server → Client: Pantalla de barro para Augusto. Args: (duration: number)
+	MudScreen = getOrCreateRemote(eventsFolder, "MudScreen"),
+
+	--- Server → Client: Popup hack de Dante. Args: (duration: number, intensity: number)
+	PopupHack = getOrCreateRemote(eventsFolder, "PopupHack"),
+
+	--- Server → Client: Activar doble salto en el cliente. Args: (duration: number)
+	ActivateDoubleJump = getOrCreateRemote(eventsFolder, "ActivateDoubleJump"),
+
+	-- =========================================================================
+	-- 🏃 ESCAPE (Client → Server y Server → Client)
+	-- =========================================================================
+
+	--- Server → Client: Notificar al jugador que escapó.
+	PlayerEscaped = getOrCreateRemote(eventsFolder, "PlayerEscaped"),
+
+	-- =========================================================================
+	-- 💀 EJECUCIÓN (Server → Client)
+	-- =========================================================================
+
+	--- Server → Client: Iniciar animación de kill execution.
+	--- Args: (role: "Killer"|"Survivor", killerId: string, victimName: string?, duration: number)
+	KillExecution = getOrCreateRemote(eventsFolder, "KillExecution"),
+
+	-- =========================================================================
+	-- 📦 INVENTARIO (Client ↔ Server)
+	-- =========================================================================
+
+	--- Client → Server: Cambiar personaje seleccionado. Args: (role: string, characterId: string)
+	SelectCharacter = getOrCreateRemote(eventsFolder, "SelectCharacter"),
+
+	--- Server → Client: Enviar selección guardada al conectarse.
+	LoadSelection = getOrCreateRemote(eventsFolder, "LoadSelection"),
+
+	-- =========================================================================
+	-- 📊 ESTADÍSTICAS (Server → Client)
+	-- =========================================================================
+
+	--- Server → Client: Enviar stats al fin de partida.
+	DisplayStats = getOrCreateRemote(eventsFolder, "DisplayStats"),
+
+	-- =========================================================================
+	-- 🔗 BINDABLE EVENTS (Server → Server, sin cruzar la red)
+	-- =========================================================================
+
+	--- Disparado por MusicManagerService cuando termina la música LMS.
+	LMSTimeout = getOrCreateBindable("LMSTimeout"),
+}
+
+return RemoteRegistry
 ========== ARCHIVO: ./src/ReplicatedStorage/Enums/StatusEffects.lua ==========
 
+-- =============================================================================
+-- StatusEffectType.lua
+-- Ubicación: src/shared/enums/StatusEffectType.lua
+-- =============================================================================
 
+--- @enum StatusEffectType
+local StatusEffectType = {
+	STUN        = "STUN",        -- WalkSpeed = 0, JumpPower = 0
+	SLOW        = "SLOW",        -- WalkSpeed reducida a valor fijo
+	SPEED_BOOST = "SPEED_BOOST", -- WalkSpeed multiplicada
+	INVINCIBLE  = "INVINCIBLE",  -- I-Frames: ignora daño entrante
+	INVISIBLE   = "INVISIBLE",   -- Transparencia alta
+	BLIND       = "BLIND",       -- Vignette en pantalla del afectado
+	MARKED      = "MARKED",      -- Highlight permanente (Emanuel)
+	RAGE        = "RAGE",        -- Buff compuesto de Poro
+}
+
+return table.freeze(StatusEffectType)
+========== ARCHIVO: ./src/ReplicatedStorage/Enums/CharacterType.lua ==========
+
+-- =============================================================================
+-- CharacterType.lua
+-- Ubicación: src/shared/enums/CharacterType.lua
+-- =============================================================================
+
+--- @enum CharacterType
+local CharacterType = {
+	SURVIVOR = "Survivor",
+	KILLER   = "Killer",
+}
+
+return table.freeze(CharacterType)
 ========== ARCHIVO: ./src/ReplicatedStorage/Enums/GameState.lua ==========
 
+-- =============================================================================
+-- GameState.lua
+-- Ubicación: src/shared/enums/GameState.lua
+--
+-- Enum que define todos los estados posibles del juego.
+-- Elimina el uso de strings mágicos dispersos en el código.
+--
+-- Principio SOLID: Open/Closed — agregar un estado nuevo no modifica
+--                  la lógica existente, solo extiende esta tabla.
+-- =============================================================================
 
+--- @enum GameState
+local GameState = {
+	-- Fase pre-partida
+	WAITING      = "WAITING",       -- Esperando jugadores mínimos
+	LOBBY        = "LOBBY",         -- Countdown de lobby
+	SELECTING    = "SELECTING",     -- Asignando roles y spawneando
+
+	-- Fases de partida activa
+	PLAYING      = "PLAYING",       -- Juego en progreso normal
+	CHASE        = "CHASE",         -- Persecución activa (música de chase)
+	LAST_MAN     = "LAST_MAN",      -- Un solo superviviente (LMS)
+	ESCAPE       = "ESCAPE",        -- Puerta abierta, fase de escape
+
+	-- Fin de partida
+	ENDING       = "ENDING",        -- Mostrando resultados
+	INTERMISSION = "INTERMISSION",  -- Entre partidas
+}
+
+-- Hace la tabla inmutable para evitar mutaciones accidentales en runtime
+return table.freeze(GameState)
 ========== ARCHIVO: ./src/ReplicatedStorage/Models/SkillModel.lua ==========
 
+-- =============================================================================
+-- SkillModel.lua
+-- Ubicación: src/shared/models/SkillModel.lua
+--
+-- Define el contrato de una habilidad ejecutable en el servidor.
+-- Desacopla la definición de datos de la lógica de ejecución.
+--
+-- Patrón: Strategy + Data-Driven Design
+-- Principio SOLID: Open/Closed — agregar una habilidad nueva NO requiere
+--                  modificar SkillManagerService, solo crear un nuevo config.
+-- =============================================================================
 
+-- ---------------------------------------------------------------------------
+-- Tipos de efectos que puede producir una habilidad
+-- ---------------------------------------------------------------------------
+export type EffectType =
+	"Dash"        |  -- Impulso de movimiento
+	"Damage"      |  -- Daño directo
+	"Heal"        |  -- Curación
+	"Stun"        |  -- Aturdimiento
+	"Slow"        |  -- Ralentización
+	"SpeedBoost"  |  -- Boost de velocidad
+	"Teleport"    |  -- Teletransporte
+	"Projectile"  |  -- Proyectil que viaja
+	"AoE"         |  -- Área de efecto
+	"Stealth"     |  -- Invisibilidad / transparencia
+	"Blind"       |  -- Cegar pantalla del objetivo
+	"Invincible"  |  -- I-Frames
+	"Spawn"       |  -- Colocar objeto en mundo
+	"Mark"        |  -- Marcar objetivo
+	"DoubleJump"  |  -- Habilitar doble salto
+	"Custom"         -- Lógica custom referenciada por ID
+
+export type SkillEffect = {
+	type        : EffectType,
+	value       : number?,        -- daño, curación, velocidad, etc.
+	duration    : number?,        -- duración del efecto en segundos
+	radius      : number?,        -- radio de AoE
+	range       : number?,        -- rango máximo
+	targetFilter: string?,        -- "Survivors" | "Killers" | "All" | "Self"
+	[string]    : any,            -- parámetros específicos adicionales
+}
+
+--- Tipo completo de una definición de habilidad.
+export type SkillDefinition = {
+	-- Identificadores
+	id          : string,          -- ej: "PORO_Q", "GONZACARBON_E"
+	characterId : string,          -- "PORO", "GONZACARBON", etc.
+	key         : string,          -- "Q" | "E" | "R" | "F"
+	name        : string,
+	description : string,
+	icon        : string,
+
+	-- Timing
+	cooldown    : number,
+	castTime    : number?,         -- segundos de animación antes de aplicar efecto
+	duration    : number?,         -- duración total del skill activo
+
+	-- Costos
+	staminaCost : number?,
+
+	-- Si es de un solo uso por partida
+	oneTimeUse  : boolean?,
+
+	-- Efectos encadenados que produce
+	effects     : {SkillEffect}?,
+
+	-- Validadores: funciones que retornan true si se puede castear
+	-- (definidas en el servidor, no aquí para evitar exploits)
+	validatorIds: {string}?,
+
+	-- Handler custom (cuando la lógica es demasiado única)
+	-- El SkillManagerService buscará un handler registrado con este id
+	customHandlerId: string?,
+}
+
+-- =============================================================================
+-- Factory de SkillDefinition con valores por defecto
+-- =============================================================================
+local SkillModel = {}
+
+--- Construye una SkillDefinition con defaults y validación de campos requeridos.
+function SkillModel.new(data: table): SkillDefinition
+	assert(data.id,          "[SkillModel] Requiere 'id'")
+	assert(data.characterId, "[SkillModel] Requiere 'characterId'")
+	assert(data.key,         "[SkillModel] Requiere 'key'")
+	assert(data.name,        "[SkillModel] Requiere 'name'")
+	assert(data.cooldown,    "[SkillModel] Requiere 'cooldown'")
+
+	return {
+		id              = data.id,
+		characterId     = data.characterId,
+		key             = data.key,
+		name            = data.name,
+		description     = data.description     or "",
+		icon            = data.icon            or "rbxassetid://4966601445",
+		cooldown        = data.cooldown,
+		castTime        = data.castTime        or 0,
+		duration        = data.duration,
+		staminaCost     = data.staminaCost     or 0,
+		oneTimeUse      = data.oneTimeUse      or false,
+		effects         = data.effects         or {},
+		validatorIds    = data.validatorIds    or {},
+		customHandlerId = data.customHandlerId,
+	}
+end
+
+return SkillModel
+========== ARCHIVO: ./src/ReplicatedStorage/Models/CharacterModel.lua ==========
+
+-- =============================================================================
+-- CharacterModel.lua
+-- Ubicación: src/shared/models/CharacterModel.lua
+--
+-- Data Transfer Object (DTO) que define la estructura de un personaje.
+-- Actúa como contrato entre el servidor, cliente y los configs.
+--
+-- Patrón: DTO (Data Transfer Object)
+-- Principio SOLID: Interface Segregation — define exactamente qué necesita
+--                  cada consumidor de datos de personaje.
+-- =============================================================================
+
+--- @class CharacterModel
+--- Tipos Luau para validación estática y autocompletado.
+
+export type AbilityDefinition = {
+	Key        : string,   -- "Q" | "E" | "R" | "F"
+	Name       : string,
+	ServerName : string,   -- Identificador usado en el servidor
+	Description: string,
+	Icon       : string,   -- rbxassetid://...
+	Cooldown   : number,
+	Duration   : number?,
+	-- Parámetros variables según la habilidad (no tipados estrictamente aquí,
+	-- cada SkillDefinition tiene su propio tipo)
+	[string]   : any,
+}
+
+export type PassiveDefinition = {
+	Name       : string,
+	Description: string,
+	[string]   : any,  -- parámetros específicos del passive
+}
+
+export type SurvivorCharacter = {
+	Name         : string,
+	Description  : string,
+	Icon         : string,
+	WalkSpeed    : number,
+	RunSpeed     : number,
+	BaseStamina  : number,
+	RegenRate    : number?,
+	HealthMultiplier: number?,
+	Passive      : PassiveDefinition,
+	Abilities    : {AbilityDefinition},
+}
+
+export type KillerCharacter = {
+	Name        : string,
+	Description : string,
+	Icon        : string,
+	BaseSpeed   : number,
+	M1Damage    : number,
+	M1Cooldown  : number,
+	MaxHealth   : number?,  -- nil = infinito (solo MIGUEL tiene HP)
+	HasHealth   : boolean?,
+	Passive     : PassiveDefinition,
+	Skills      : {AbilityDefinition},
+}
+
+-- =============================================================================
+-- Factory: Constructores con valores por defecto y validación
+-- =============================================================================
+local CharacterModel = {}
+
+--- Crea un Survivor con valores por defecto para campos opcionales.
+--- @param data table  Datos parciales del superviviente.
+--- @return SurvivorCharacter
+function CharacterModel.newSurvivor(data: table): SurvivorCharacter
+	assert(data.Name,      "[CharacterModel] Survivor requiere 'Name'")
+	assert(data.Abilities, "[CharacterModel] Survivor requiere 'Abilities'")
+
+	return {
+		Name            = data.Name,
+		Description     = data.Description     or "Sin descripción",
+		Icon            = data.Icon            or "rbxassetid://4966601445",
+		WalkSpeed       = data.WalkSpeed       or 16,
+		RunSpeed        = data.RunSpeed        or 24,
+		BaseStamina     = data.BaseStamina     or 50,
+		RegenRate       = data.RegenRate       or 1.0,
+		HealthMultiplier= data.HealthMultiplier or 1.0,
+		Passive         = data.Passive         or { Name = "Sin Pasiva", Description = "" },
+		Abilities       = data.Abilities,
+	}
+end
+
+--- Crea un Killer con valores por defecto para campos opcionales.
+--- @param data table  Datos parciales del asesino.
+--- @return KillerCharacter
+function CharacterModel.newKiller(data: table): KillerCharacter
+	assert(data.Name,   "[CharacterModel] Killer requiere 'Name'")
+	assert(data.Skills, "[CharacterModel] Killer requiere 'Skills'")
+
+	return {
+		Name       = data.Name,
+		Description= data.Description or "Sin descripción",
+		Icon       = data.Icon        or "rbxassetid://4966601445",
+		BaseSpeed  = data.BaseSpeed   or 20,
+		M1Damage   = data.M1Damage    or 20,
+		M1Cooldown = data.M1Cooldown  or 1.0,
+		MaxHealth  = data.MaxHealth,
+		HasHealth  = data.HasHealth   or false,
+		Passive    = data.Passive     or { Name = "Sin Pasiva", Description = "" },
+		Skills     = data.Skills,
+	}
+end
+
+return CharacterModel
 ========== ARCHIVO: ./src/ServerScriptService/Data/GameConstants.lua ==========
 
 
+========== ARCHIVO: ./src/ServerScriptService/Data/CharacterRegistry.lua ==========
+
+-- =============================================================================
+-- CharacterRegistry.lua
+-- Ubicación: src/server/data/CharacterRegistry.lua
+--
+-- Registro central de todos los personajes del juego.
+-- Reemplaza el módulo "CharacterData" monolítico (~600 líneas).
+--
+-- Patrón: Registry + Factory
+-- Principio SOLID:
+--   - Single Responsibility: solo almacena y provee configs.
+--   - Open/Closed: agregar personaje = agregar un archivo en CharacterConfigs/
+--     SIN modificar este registro.
+-- =============================================================================
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScript      = game:GetService("ServerScriptService")
+
+local CharacterModel = require(ReplicatedStorage.Models.CharacterModel)
+
+-- ---------------------------------------------------------------------------
+-- Configuraciones de Supervivientes (importadas de archivos individuales)
+-- Cada archivo retorna una SurvivorCharacter validada.
+-- ---------------------------------------------------------------------------
+local SurvivorConfigs = ServerScript.Data.CharacterConfigs
+
+local SURVIVORS = {
+	GONZACARBON  = require(SurvivorConfigs.GONZACARBON),
+	SIU          = require(SurvivorConfigs.SIU),
+	NARIZTOTELES = require(SurvivorConfigs.NARIZTOTELES),
+	SURI         = require(SurvivorConfigs.SURI),
+	VACUMING     = require(SurvivorConfigs.VACUMING),
+	RICALY       = require(SurvivorConfigs.RICALY),
+	CACHETES     = require(SurvivorConfigs.CACHETES),
+}
+
+local KILLERS = {
+	PORO    = require(SurvivorConfigs.PORO),
+	DANTE   = require(SurvivorConfigs.DANTE),
+	JALY    = require(SurvivorConfigs.JALY),
+	AUGUSTO = require(SurvivorConfigs.AUGUSTO),
+	MIGUEL  = require(SurvivorConfigs.MIGUEL),
+	EMANUEL = require(SurvivorConfigs.EMANUEL),
+}
+
+-- Alias de compatibilidad hacia atrás
+SURVIVORS.ISMAIL = SURVIVORS.SIU
+
+-- ---------------------------------------------------------------------------
+-- Listas de desbloqueados por defecto (podrían venir de PlayerDataService)
+-- ---------------------------------------------------------------------------
+local DEFAULT_UNLOCKED_SURVIVORS = {
+	"GONZACARBON", "SIU", "NARIZTOTELES", "SURI", "VACUMING", "RICALY", "CACHETES"
+}
+local DEFAULT_UNLOCKED_KILLERS = {
+	"PORO", "DANTE", "JALY", "AUGUSTO", "MIGUEL", "EMANUEL"
+}
+
+-- =============================================================================
+-- API Pública
+-- =============================================================================
+local CharacterRegistry = {}
+
+--- Retorna la config de un superviviente. Nil si no existe.
+function CharacterRegistry.getSurvivor(id: string): CharacterModel.SurvivorCharacter?
+	return SURVIVORS[id]
+end
+
+--- Retorna la config de un killer. Nil si no existe.
+function CharacterRegistry.getKiller(id: string): CharacterModel.KillerCharacter?
+	return KILLERS[id]
+end
+
+--- Verifica si un ID de superviviente es válido.
+function CharacterRegistry.isSurvivor(id: string): boolean
+	return SURVIVORS[id] ~= nil
+end
+
+--- Verifica si un ID de killer es válido.
+function CharacterRegistry.isKiller(id: string): boolean
+	return KILLERS[id] ~= nil
+end
+
+--- Retorna todos los IDs de supervivientes desbloqueados por defecto.
+function CharacterRegistry.getDefaultSurvivorIds(): {string}
+	return table.clone(DEFAULT_UNLOCKED_SURVIVORS)
+end
+
+--- Retorna todos los IDs de killers desbloqueados por defecto.
+function CharacterRegistry.getDefaultKillerIds(): {string}
+	return table.clone(DEFAULT_UNLOCKED_KILLERS)
+end
+
+--- Retorna la config de un personaje según rol y ID.
+--- Conveniente para código que recibe el rol dinámicamente.
+function CharacterRegistry.get(role: string, id: string): (CharacterModel.SurvivorCharacter | CharacterModel.KillerCharacter)?
+	if role == "Survivor" then
+		return CharacterRegistry.getSurvivor(id)
+	elseif role == "Killer" then
+		return CharacterRegistry.getKiller(id)
+	end
+	return nil
+end
+
+--- Retorna la tabla completa de supervivientes (lectura only).
+function CharacterRegistry.getAllSurvivors(): {[string]: CharacterModel.SurvivorCharacter}
+	return SURVIVORS
+end
+
+--- Retorna la tabla completa de killers (lectura only).
+function CharacterRegistry.getAllKillers(): {[string]: CharacterModel.KillerCharacter}
+	return KILLERS
+end
+
+return CharacterRegistry
 ========== ARCHIVO: ./src/ServerScriptService/Data/CharacterConfigs/VACUMING.lua ==========
 
 
 ========== ARCHIVO: ./src/ServerScriptService/Data/CharacterConfigs/PORO.lua ==========
 
-xd xd 
+-- =============================================================================
+-- PORO.lua
+-- Ubicación: src/server/data/CharacterConfigs/PORO.lua
+-- =============================================================================
+
+local CharacterModel = require(game.ReplicatedStorage.Models.CharacterModel)
+
+return CharacterModel.newKiller({
+	Name        = "Poro Player",
+	Description = "Berserker imparable de corto alcance",
+	Icon        = "rbxassetid://110065651459046",
+	BaseSpeed   = 20,
+	M1Damage    = 25,
+	M1Cooldown  = 1.1,
+
+	Passive = {
+		Name        = "Sed de Sangre",
+		Description = "Genera IRA al golpear (+25) o ser aturdido (+20). Al llegar a 100 activa R.",
+		RagePerHit  = 25,
+		RagePerStun = 20,
+	},
+
+	Skills = {
+		{
+			Key             = "Q",
+			Name            = "Carga de Colisión",
+			ServerName      = "MARCHA",
+			Description     = "Embestida lineal. Si choca con pared, self-stun 2s.",
+			Icon            = "rbxassetid://4966601445",
+			Cooldown        = 15,
+			Duration        = 2,
+			customHandlerId = "MARCHA",
+			effects = {
+				{ type = "Dash",   value = 55, duration = 2 },
+				{ type = "Damage", value = 15, radius = 5, targetFilter = "Survivors" },
+			},
+			-- Parámetros específicos del handler
+			Speed         = 55,
+			Damage        = 15,
+			SelfStunOnWall = 2.0,
+		},
+		{
+			Key             = "E",
+			Name            = "Agarre Brutal",
+			ServerName      = "ESTRANGULAR",
+			Description     = "Lanza cadena. Si fallas, lentitud 50% por 2s.",
+			Icon            = "rbxassetid://4966601445",
+			Cooldown        = 22,
+			customHandlerId = "ESTRANGULAR",
+			Range      = 45,
+			PullForce  = 100,
+			WhiffSlow  = 0.5,
+		},
+		{
+			Key             = "R",
+			Name            = "RAGE MODE",
+			ServerName      = "RAGE MODE",
+			Description     = "Ganas Velocidad (32), M1 instantáneo y ESP total por 20s. 1 USO POR PARTIDA.",
+			Icon            = "rbxassetid://4966601445",
+			Cooldown        = 0,  -- controlado por RageMeter, no por tiempo
+			Duration        = 40,
+			oneTimeUse      = true,
+			customHandlerId = "RAGE_MODE",
+			RageRequired = 100,
+			BuffSpeed    = 32,
+		},
+		{
+			Key             = "F",
+			Name            = "Rugido Aterrador",
+			ServerName      = "PISOTÓN",
+			Description     = "Ralentiza a todos en un radio de 25 studs.",
+			Icon            = "rbxassetid://4966601445",
+			Cooldown        = 30,
+			customHandlerId = "PISOTON",
+			effects = {
+				{ type = "Slow", value = 0.6, duration = 3, radius = 25, targetFilter = "Survivors" },
+			},
+			Radius      = 25,
+			Slow        = 0.6,
+			SlowDuration= 3,
+		},
+	},
+})
+========== ARCHIVO: ./src/ServerScriptService/Data/CharacterConfigs/GONZACARBON.lua ==========
+
+-- =============================================================================
+-- GONZACARBON.lua
+-- Ubicación: src/server/data/CharacterConfigs/GONZACARBON.lua
+--
+-- Config data-driven de Gonzacarbon. Este archivo es TODO lo que necesitas
+-- editar para cambiar su balance o habilidades.
+--
+-- NO contiene lógica de ejecución. La lógica está en SkillManagerService
+-- y los handlers registrados via customHandlerId.
+-- =============================================================================
+
+local CharacterModel = require(game.ReplicatedStorage.Models.CharacterModel)
+
+return CharacterModel.newSurvivor({
+	Name        = "Gonzacarbon",
+	Description = "Maestro del sigilo con ceguera de carbón",
+	Icon        = "rbxassetid://107204421092035",
+	WalkSpeed   = 16,
+	RunSpeed    = 26,
+	BaseStamina = 50,
+	RegenRate   = 1.2,
+
+	Passive = {
+		Name            = "Corcho Protector",
+		Description     = "Reduces el 20% del daño recibido",
+		DamageReduction = 0.20,
+		LastStandSpeed  = 1.3,  -- multiplicador de velocidad al tener <30% HP
+	},
+
+	Abilities = {
+		{
+			Key         = "Q",
+			Name        = "Ceguera de Carbón",
+			ServerName  = "CEGUERA",
+			Description = "Ciega al asesino en un rango de 30 studs",
+			Icon        = "rbxassetid://4966601445",
+			Cooldown    = 50,
+			Duration    = 5,
+			Range       = 30,
+			VignetteSize = 0.85,
+
+			-- El SkillManagerService buscará y ejecutará el handler "CEGUERA"
+			customHandlerId = "CEGUERA",
+		},
+		{
+			Key         = "E",
+			Name        = "Camuflaje Carbón",
+			ServerName  = "CAMUFLAJE",
+			Description = "Te vuelves casi invisible por 6 segundos",
+			Icon        = "rbxassetid://4966601445",
+			Cooldown    = 45,
+			Duration    = 6,
+			Transparency = 0.95,
+
+			customHandlerId = "CAMUFLAJE",
+
+			-- Efectos declarativos (pueden ser procesados por EffectsSystem
+			-- además del handler custom)
+			effects = {
+				{
+					type     = "Stealth",
+					duration = 6,
+					value    = 0.95,  -- nivel de transparencia
+				},
+			},
+		},
+	},
+})
 ========== ARCHIVO: ./src/ServerScriptService/Systems/DamageSystem.lua ==========
 
+-- =============================================================================
+-- DamageSystem.lua
+-- Ubicación: src/server/systems/DamageSystem.lua
+--
+-- Sistema server-authoritative de cálculo y aplicación de daño.
+-- Toda lógica de daño pasa por aquí — NUNCA el cliente calcula daño.
+--
+-- Principio SOLID: Single Responsibility
+-- Patrón: ECS System (sin estado propio, opera sobre entidades externas)
+-- =============================================================================
 
+local Players           = game:GetService("Players")
+local Debris            = game:GetService("Debris")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local GameConstants    = require(ReplicatedStorage.GameConstants)
+local StatusEffectType = require(ReplicatedStorage.Enums.StatusEffectType)
+local RemoteRegistry   = require(ReplicatedStorage.Network.RemoteRegistry)
+local ServerEventBus   = require(ServerScriptService.Network.ServerEventBus)
+local StatusEffectSystem = require(script.Parent.StatusEffectSystem)
+
+-- Importación lazy para evitar ciclos
+local CharacterRegistry
+
+local function getCharacterRegistry()
+	if not CharacterRegistry then
+		CharacterRegistry = require(script.Parent.Parent.data.CharacterRegistry)
+	end
+	return CharacterRegistry
+end
+
+-- =============================================================================
+-- Hitbox (extraído de GameManager, ahora encapsulado)
+-- =============================================================================
+
+local HitboxSystem = {}
+HitboxSystem.__index = HitboxSystem
+
+local C = GameConstants.Combat
+
+function HitboxSystem.new(attacker: Model, size: Vector3?, offset: Vector3?, duration: number?)
+	local self = setmetatable({}, HitboxSystem)
+	self.attacker    = attacker
+	self.root        = attacker:FindFirstChild("HumanoidRootPart")
+	self.size        = size     or C.DEFAULT_HITBOX_SIZE
+	self.offset      = offset   or C.DEFAULT_HITBOX_OFFSET
+	self.duration    = duration or C.HITBOX_DURATION
+	self.hitTargets  = {}
+	self.active      = true
+	self._connection = nil
+	return self
+end
+
+function HitboxSystem:Start(onHit: (hitData: table) -> ())
+	if not self.root then return end
+
+	local startTime = os.clock()
+	self._connection = RunService.Heartbeat:Connect(function()
+		if not self.active or not self.root or not self.root.Parent then
+			self:Destroy()
+			return
+		end
+
+		if (os.clock() - startTime) >= self.duration then
+			self:Destroy()
+			return
+		end
+
+		local hitCFrame = self.root.CFrame * CFrame.new(
+			self.offset.X, self.offset.Y, self.offset.Z
+		)
+
+		local params = OverlapParams.new()
+		params.FilterDescendantsInstances = { self.attacker }
+		params.FilterType = Enum.RaycastFilterType.Exclude
+
+		local parts = workspace:GetPartBoundsInBox(hitCFrame, self.size, params)
+
+		for _, part in ipairs(parts) do
+			local char = part.Parent
+			local hum  = char:FindFirstChild("Humanoid")
+			if hum and hum.Health > 0 and not self.hitTargets[hum] then
+				self.hitTargets[hum] = true
+				onHit({ Character = char, Humanoid = hum, Part = part })
+			end
+		end
+	end)
+end
+
+function HitboxSystem:Destroy()
+	self.active = false
+	if self._connection then
+		self._connection:Disconnect()
+		self._connection = nil
+	end
+end
+
+-- =============================================================================
+-- DamageSystem API
+-- =============================================================================
+local DamageSystem = {}
+
+--- Aplica daño a un personaje con toda la lógica de pasivos y mitigaciones.
+---
+--- @param victim    Model    Personaje que recibe el daño.
+--- @param amount    number   Daño base a aplicar.
+--- @param attacker  Model?   Personaje que atacó (para efectos especiales).
+--- @return number   Daño final aplicado.
+function DamageSystem.applyDamage(victim: Model, amount: number, attacker: Model?): number
+	local hum = victim:FindFirstChild("Humanoid")
+	if not hum or hum.Health <= 0 then return 0 end
+
+	-- I-Frames: si el objetivo es invulnerable, ignorar
+	if StatusEffectSystem.has(victim, StatusEffectType.INVINCIBLE) then
+		DamageSystem._showBlockEffect(victim)
+		return 0
+	end
+
+	-- Calcular mitigaciones del superviviente
+	local finalDamage = DamageSystem._calculateMitigation(victim, amount)
+
+	-- Aplicar daño
+	hum:TakeDamage(finalDamage)
+
+	-- Efectos especiales del atacante (Ej: Miguel recibe daño al stunear)
+	if attacker then
+		DamageSystem._handleAttackerSpecials(attacker, finalDamage)
+	end
+
+	-- Efectos visuales al dañado
+	local victimPlayer = Players:GetPlayerFromCharacter(victim)
+	if victimPlayer then
+		RemoteRegistry.DamageEffect:FireClient(victimPlayer)
+	end
+
+	-- Emitir evento al bus
+	local attackerPlayer = attacker and Players:GetPlayerFromCharacter(attacker)
+	local victimPlayer2  = Players:GetPlayerFromCharacter(victim)
+	if victimPlayer2 then
+		ServerEventBus.PlayerDamaged:Fire(victimPlayer2, attackerPlayer, finalDamage, "M1")
+	end
+
+	return finalDamage
+end
+
+--- Ejecuta un hitbox de M1 para un killer, aplicando daño a supervivientes en rango.
+---
+--- @param killer        Model   Personaje killer.
+--- @param killerPlayer  Player  Jugador killer.
+function DamageSystem.executeM1(killer: Model, killerPlayer: Player)
+	local reg = getCharacterRegistry()
+	local killerTag = killer:FindFirstChild("KillerID")
+	if not killerTag then return end
+
+	local killerConfig = reg.getKiller(killerTag.Value)
+	if not killerConfig then return end
+
+	local damage    = killerConfig.M1Damage
+	local root      = killer:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	-- Efecto visual de slash
+	DamageSystem._createSlashFX(root)
+
+	-- Sonido
+	local sfx = Instance.new("Sound", root)
+	sfx.SoundId = "rbxassetid://131237241"
+	sfx.Volume  = 0.5
+	sfx:Play()
+	Debris:AddItem(sfx, 1)
+
+	-- Crear hitbox y procesar hits
+	local hitbox = HitboxSystem.new(killer)
+	hitbox:Start(function(hitData)
+		local victimChar = hitData.Character
+		local victimHum  = hitData.Humanoid
+
+		-- Solo dañar supervivientes (no al mismo killer)
+		local survivorTag = victimChar:FindFirstChild("SurvivorID")
+		if not survivorTag then return end
+
+		-- Verificar counter de Nariztoteles
+		if DamageSystem._checkCounter(victimChar, killer, killerPlayer) then
+			hitbox:Destroy()
+			return
+		end
+
+		-- Calcular daño con pasivos del killer
+		local adjustedDamage = DamageSystem._applyKillerPassives(killer, killerTag.Value, damage)
+
+		-- Aplicar daño
+		local finalDamage = DamageSystem.applyDamage(victimChar, adjustedDamage, killer)
+
+		-- Verificar umbral de ejecución
+		if finalDamage > 0 then
+			DamageSystem._checkExecutionThreshold(victimChar, victimHum, killer, killerConfig)
+		end
+	end)
+end
+
+-- =============================================================================
+-- Privados
+-- =============================================================================
+
+function DamageSystem._calculateMitigation(victim: Model, rawDamage: number): number
+	local survivorTag = victim:FindFirstChild("SurvivorID")
+	if not survivorTag then return rawDamage end
+
+	local reg    = getCharacterRegistry()
+	local config = reg.getSurvivor(survivorTag.Value)
+	if not config then return rawDamage end
+
+	local reduction = config.Passive and config.Passive.DamageReduction or 0
+	return rawDamage * (1 - reduction)
+end
+
+function DamageSystem._applyKillerPassives(killer: Model, killerId: string, damage: number): number
+	-- JALY: Combo hits aumentan el daño
+	if killerId == "JALY" then
+		local combo = killer:FindFirstChild("ComboHits")
+		if combo then
+			damage = damage + (combo.Value * 3)
+			combo.Value = math.min(combo.Value + 1, 5)
+			task.delay(3, function()
+				if combo.Parent then combo.Value = 0 end
+			end)
+		end
+	end
+	return damage
+end
+
+function DamageSystem._handleAttackerSpecials(attacker: Model, damage: number)
+	local killerTag = attacker:FindFirstChild("KillerID")
+	if not killerTag then return end
+
+	-- PORO: Ganar rage al golpear
+	if killerTag.Value == "PORO" then
+		local rage = attacker:FindFirstChild("RageMeter")
+		if rage then
+			rage.Value = math.min(rage.Value + 25, 100)
+		end
+	end
+end
+
+function DamageSystem._checkCounter(victimChar: Model, killer: Model, killerPlayer: Player): boolean
+	if not victimChar:FindFirstChild("CounterActive") then return false end
+	if not victimChar.CounterActive.Value then return false end
+
+	-- Counter de Nariztoteles activado
+	victimChar.CounterActive.Value = false
+	if victimChar:FindFirstChild("CounterSuccess") then
+		victimChar.CounterSuccess.Value = true
+	end
+
+	-- Stunear al killer
+	StatusEffectSystem.apply(killer, StatusEffectType.STUN, 0, 3)
+
+	-- Empujar al superviviente hacia atrás
+	local victimRoot = victimChar:FindFirstChild("HumanoidRootPart")
+	if victimRoot then
+		victimRoot.CFrame = victimRoot.CFrame + (-victimRoot.CFrame.LookVector * 15)
+	end
+
+	-- VFX de counter
+	DamageSystem._createCounterFX(victimChar)
+
+	return true
+end
+
+function DamageSystem._checkExecutionThreshold(victimChar: Model, victimHum: Humanoid, killer: Model, killerConfig: table)
+	local healthPercent = victimHum.Health / victimHum.MaxHealth
+	local C = GameConstants.Combat
+
+	if healthPercent <= C.EXECUTE_HP_THRESHOLD and not victimChar:FindFirstChild("BeingExecuted") then
+		-- Solo EMANUEL tiene ejecución directa, pero el sistema está abierto
+		-- Los handlers de skills se encargan de triggerear esto
+		print(string.format("[DamageSystem] %s en umbral de ejecución (%.0f%%)",
+			victimChar.Name, healthPercent * 100))
+	end
+end
+
+function DamageSystem._showBlockEffect(victim: Model)
+	local root = victim:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	local fx = Instance.new("Part", workspace)
+	fx.Shape = Enum.PartType.Ball
+	fx.Size  = Vector3.new(3, 3, 3)
+	fx.Position = root.Position
+	fx.Color = Color3.fromRGB(255, 255, 100)
+	fx.Material = Enum.Material.Neon
+	fx.Transparency = 0
+	fx.Anchored = true
+	fx.CanCollide = false
+	TweenService:Create(fx, TweenInfo.new(0.3), { Size = Vector3.new(6,6,6), Transparency = 1 }):Play()
+	Debris:AddItem(fx, 0.3)
+end
+
+function DamageSystem._createSlashFX(root: BasePart)
+	local slash = Instance.new("Part", workspace)
+	slash.Size  = Vector3.new(0.3, 5, 5)
+	slash.CFrame = root.CFrame * CFrame.new(0, 0, -3.5)
+	slash.Color = Color3.fromRGB(200, 0, 0)
+	slash.Material = Enum.Material.Neon
+	slash.Transparency = 0.3
+	slash.Anchored = true
+	slash.CanCollide = false
+	TweenService:Create(slash, TweenInfo.new(0.3), { Transparency = 1, Size = Vector3.new(0.1, 7, 7) }):Play()
+	Debris:AddItem(slash, 0.3)
+end
+
+function DamageSystem._createCounterFX(victimChar: Model)
+	local root = victimChar:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	local fx = Instance.new("Part", workspace)
+	fx.Shape = Enum.PartType.Ball
+	fx.Size  = Vector3.new(10, 10, 10)
+	fx.Position = root.Position
+	fx.Color = Color3.fromRGB(0, 255, 255)
+	fx.Material = Enum.Material.Neon
+	fx.Transparency = 0
+	fx.Anchored = true
+	fx.CanCollide = false
+	TweenService:Create(fx, TweenInfo.new(0.5), { Transparency = 1, Size = Vector3.new(20, 20, 20) }):Play()
+	Debris:AddItem(fx, 0.5)
+
+	local sound = Instance.new("Sound", root)
+	sound.SoundId = "rbxassetid://5273899897"
+	sound.Volume  = 1
+	sound:Play()
+	Debris:AddItem(sound, 2)
+end
+
+return DamageSystem
 ========== ARCHIVO: ./src/ServerScriptService/Systems/StatusEffectSystem.lua ==========
 
+-- =============================================================================
+-- StatusEffectSystem.lua
+-- Ubicación: src/server/systems/StatusEffectSystem.lua
+--
+-- Sistema UNIFICADO de efectos de estado. Reemplaza la lógica dispersa de
+-- stun, slow, i-frames y speed boost que existía en GameManager.lua.
+--
+-- Patrón: ECS System (procesa componentes de efecto en entidades-Model)
+-- Principio SOLID:
+--   - Single Responsibility: solo gestiona efectos de estado.
+--   - Open/Closed: agregar un efecto nuevo = agregar un entry en HANDLERS.
+-- =============================================================================
 
+local TweenService = game:GetService("TweenService")
+local Debris       = game:GetService("Debris")
+local Players      = game:GetService("Players")
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local StatusEffectType = require(ReplicatedStorage.Enums.StatusEffectType)
+local GameConstants    = require(ReplicatedStorage.GameConstants)
+local RemoteRegistry   = require(ReplicatedStorage.Network.RemoteRegistry)
+local ServerEventBus   = require(ServerScriptService.Network.ServerEventBus)
+
+-- ---------------------------------------------------------------------------
+-- Estado interno: efectos activos por personaje
+-- { [Model] = { [StatusEffectType] = { level, endTime, cleanup } } }
+-- ---------------------------------------------------------------------------
+local activeEffects: {[Model]: {[string]: {level: number, endTime: number, cleanup: (() -> ())?}}} = {}
+
+-- ---------------------------------------------------------------------------
+-- Helpers internos
+-- ---------------------------------------------------------------------------
+
+local function getBaseSpeed(char: Model): number
+	local killerTag   = char:FindFirstChild("KillerID")
+	local survivorTag = char:FindFirstChild("SurvivorID")
+
+	if killerTag then
+		-- Importar dinámicamente para evitar ciclos
+		local CharacterRegistry = require(script.Parent.Parent.data.CharacterRegistry)
+		local config = CharacterRegistry.getKiller(killerTag.Value)
+		return config and config.BaseSpeed or 20
+	elseif survivorTag then
+		local CharacterRegistry = require(script.Parent.Parent.data.CharacterRegistry)
+		local config = CharacterRegistry.getSurvivor(survivorTag.Value)
+		return config and config.WalkSpeed or GameConstants.Movement.DEFAULT_WALK_SPEED
+	end
+
+	return GameConstants.Movement.DEFAULT_WALK_SPEED
+end
+
+local function ensureEntry(char: Model)
+	if not activeEffects[char] then
+		activeEffects[char] = {}
+
+		-- Auto-limpiar cuando el personaje es destruido
+		char.AncestryChanged:Connect(function()
+			if not char.Parent then
+				activeEffects[char] = nil
+			end
+		end)
+
+		local hum = char:FindFirstChild("Humanoid")
+		if hum then
+			hum.Died:Once(function()
+				-- Limpiar efectos al morir
+				if activeEffects[char] then
+					for _, effectData in pairs(activeEffects[char]) do
+						if effectData.cleanup then effectData.cleanup() end
+					end
+				end
+				activeEffects[char] = nil
+			end)
+		end
+	end
+end
+
+local function recalculateMovement(char: Model)
+	local hum = char:FindFirstChild("Humanoid")
+	if not hum or hum.Health <= 0 then return end
+
+	local effects = activeEffects[char]
+	if not effects then
+		hum.WalkSpeed = getBaseSpeed(char)
+		hum.JumpPower = GameConstants.Movement.DEFAULT_JUMP_POWER
+		return
+	end
+
+	local baseSpeed = getBaseSpeed(char)
+
+	-- Prioridad: STUN > SLOW > SPEED_BOOST > normal
+	if effects[StatusEffectType.STUN] then
+		hum.WalkSpeed = 0
+		hum.JumpPower = 0
+		local root = char:FindFirstChild("HumanoidRootPart")
+		if root then root.Anchored = true end
+		return
+	end
+
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if root then root.Anchored = false end
+	hum.JumpPower = GameConstants.Movement.DEFAULT_JUMP_POWER
+
+	if effects[StatusEffectType.SLOW] then
+		hum.WalkSpeed = effects[StatusEffectType.SLOW].level
+		return
+	end
+
+	if effects[StatusEffectType.SPEED_BOOST] then
+		hum.WalkSpeed = baseSpeed * effects[StatusEffectType.SPEED_BOOST].level
+		return
+	end
+
+	hum.WalkSpeed = baseSpeed
+end
+
+-- =============================================================================
+-- API Pública
+-- =============================================================================
+local StatusEffectSystem = {}
+
+--- Aplica un efecto de estado a un personaje.
+--- Si el efecto ya existe, actualiza nivel y duración según reglas de prioridad.
+---
+--- @param char      Model        Personaje objetivo.
+--- @param effectType string      Una constante de StatusEffectType.
+--- @param level     number       Valor del efecto (velocidad, transparencia, etc.)
+--- @param duration  number       Duración en segundos.
+--- @param source    Player?      Quién aplicó el efecto (para stats y eventos).
+function StatusEffectSystem.apply(char: Model, effectType: string, level: number, duration: number, source: Player?)
+	local hum = char:FindFirstChild("Humanoid")
+	if not hum or hum.Health <= 0 then return end
+
+	ensureEntry(char)
+
+	local effects  = activeEffects[char]
+	local current  = effects[effectType]
+	local endTime  = os.clock() + duration
+
+	-- Si ya existe un efecto del mismo tipo, solo actualizar si el nuevo es
+	-- más fuerte o dura más (evita que una poción débil cancele una fuerte)
+	if current then
+		local isStronger = level >= current.level
+		local lastsLonger = endTime > current.endTime
+		if not isStronger and not lastsLonger then return end
+		if current.cleanup then current.cleanup() end
+	end
+
+	-- Crear el registro del efecto
+	local effectRecord = {
+		level   = level,
+		endTime = endTime,
+		cleanup = nil :: (() -> ())?,
+	}
+	effects[effectType] = effectRecord
+
+	-- ---------------------------------------------------------------------------
+	-- Efectos visuales específicos por tipo
+	-- ---------------------------------------------------------------------------
+	if effectType == StatusEffectType.STUN then
+		StatusEffectSystem._applyStunVFX(char, duration, effectRecord)
+
+	elseif effectType == StatusEffectType.INVINCIBLE then
+		StatusEffectSystem._applyIFrameVFX(char, duration, effectRecord)
+
+	elseif effectType == StatusEffectType.INVISIBLE then
+		StatusEffectSystem._applyInvisVFX(char, level, duration, effectRecord)
+
+	elseif effectType == StatusEffectType.BLIND then
+		local player = Players:GetPlayerFromCharacter(char)
+		if player then
+			RemoteRegistry.BlindKiller:FireClient(player, duration)
+		end
+	end
+
+	-- Notificar al bus
+	ServerEventBus.StatusEffectApplied:Fire(char, effectType, duration)
+
+	-- Recalcular stats de movimiento inmediatamente
+	recalculateMovement(char)
+
+	-- Programar limpieza automática
+	task.delay(duration, function()
+		if not activeEffects[char] then return end
+		if activeEffects[char][effectType] ~= effectRecord then return end -- fue sobreescrito
+
+		if effectRecord.cleanup then effectRecord.cleanup() end
+		activeEffects[char][effectType] = nil
+		recalculateMovement(char)
+
+		ServerEventBus.StatusEffectExpired:Fire(char, effectType)
+	end)
+end
+
+--- Elimina un efecto de estado inmediatamente.
+function StatusEffectSystem.remove(char: Model, effectType: string)
+	if not activeEffects[char] then return end
+	local record = activeEffects[char][effectType]
+	if record then
+		if record.cleanup then record.cleanup() end
+		activeEffects[char][effectType] = nil
+		recalculateMovement(char)
+	end
+end
+
+--- Verifica si un personaje tiene un efecto activo.
+function StatusEffectSystem.has(char: Model, effectType: string): boolean
+	if not activeEffects[char] then return false end
+	return activeEffects[char][effectType] ~= nil
+end
+
+--- Limpia TODOS los efectos de un personaje.
+function StatusEffectSystem.clearAll(char: Model)
+	if not activeEffects[char] then return end
+	for _, record in pairs(activeEffects[char]) do
+		if record.cleanup then record.cleanup() end
+	end
+	activeEffects[char] = nil
+	recalculateMovement(char)
+end
+
+-- =============================================================================
+-- Aplicadores de VFX privados
+-- =============================================================================
+
+function StatusEffectSystem._applyStunVFX(char: Model, duration: number, record: table)
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	-- Billboard "STUNNED!"
+	local billboard = Instance.new("BillboardGui", root)
+	billboard.Size = UDim2.new(0, 200, 0, 50)
+	billboard.StudsOffset = Vector3.new(0, 3, 0)
+	local label = Instance.new("TextLabel", billboard)
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Text = "STUNNED!"
+	label.TextColor3 = Color3.fromRGB(255, 255, 0)
+	label.Font = Enum.Font.GothamBlack
+	label.TextSize = 30
+	label.TextStrokeTransparency = 0
+
+	-- Efecto visual cilíndrico amarillo
+	local stunFX = Instance.new("Part", workspace)
+	stunFX.Shape = Enum.PartType.Cylinder
+	stunFX.Size = Vector3.new(0.5, 7, 7)
+	stunFX.Position = root.Position
+	stunFX.Orientation = Vector3.new(0, 0, 90)
+	stunFX.Color = Color3.fromRGB(255, 255, 100)
+	stunFX.Material = Enum.Material.Neon
+	stunFX.Transparency = 0.3
+	stunFX.Anchored = true
+	stunFX.CanCollide = false
+
+	-- Sonido de stun
+	local sound = Instance.new("Sound", root)
+	sound.SoundId = "rbxassetid://3398620867"
+	sound.Volume = 0.8
+	sound:Play()
+	Debris:AddItem(sound, 2)
+
+	-- Notificar a la UI del jugador stunned
+	local player = Players:GetPlayerFromCharacter(char)
+	if player then
+		RemoteRegistry.StunEffect:FireClient(player, duration)
+	end
+
+	record.cleanup = function()
+		if billboard.Parent then billboard:Destroy() end
+		if stunFX.Parent then stunFX:Destroy() end
+		-- Desanclar root después del stun
+		local r = char:FindFirstChild("HumanoidRootPart")
+		if r then r.Anchored = false end
+		local h = char:FindFirstChild("Humanoid")
+		if h then h.AutoRotate = true end
+	end
+
+	Debris:AddItem(stunFX, duration)
+	Debris:AddItem(billboard, duration)
+end
+
+function StatusEffectSystem._applyIFrameVFX(char: Model, duration: number, record: table)
+	local C = GameConstants.VFX
+	local origTransparencies = {}
+
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+			origTransparencies[part] = part.Transparency
+			part.Transparency = math.min(part.Transparency + C.IFRAMES_TRANSPARENCY, 0.9)
+		end
+	end
+
+	local highlight = Instance.new("Highlight", char)
+	highlight.Name = "IFrameHighlight"
+	highlight.FillColor = Color3.fromRGB(255, 255, 100)
+	highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+	highlight.FillTransparency = 0.7
+	highlight.OutlineTransparency = 0.5
+
+	record.cleanup = function()
+		if highlight.Parent then highlight:Destroy() end
+		for part, origTrans in pairs(origTransparencies) do
+			if part.Parent then part.Transparency = origTrans end
+		end
+	end
+
+	-- Parpadeo
+	task.spawn(function()
+		local elapsed = 0
+		while elapsed < duration and highlight.Parent do
+			highlight.Enabled = not highlight.Enabled
+			task.wait(0.1)
+			elapsed += 0.1
+		end
+	end)
+end
+
+function StatusEffectSystem._applyInvisVFX(char: Model, transparency: number, duration: number, record: table)
+	local origTransparencies = {}
+
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") or part:IsA("Decal") then
+			origTransparencies[part] = part.Transparency
+			TweenService:Create(part, TweenInfo.new(0.5), { Transparency = transparency }):Play()
+		end
+	end
+
+	record.cleanup = function()
+		for part, origTrans in pairs(origTransparencies) do
+			if part.Parent then
+				TweenService:Create(part, TweenInfo.new(0.5), { Transparency = origTrans }):Play()
+			end
+		end
+	end
+end
+
+-- =============================================================================
+-- Tick: limpiar efectos expirados (doble seguridad, la principal es task.delay)
+-- =============================================================================
+task.spawn(function()
+	while true do
+		local now = os.clock()
+		for char, effects in pairs(activeEffects) do
+			if not char.Parent then
+				activeEffects[char] = nil
+				continue
+			end
+			for effectType, record in pairs(effects) do
+				if now >= record.endTime then
+					if record.cleanup then record.cleanup() end
+					effects[effectType] = nil
+					recalculateMovement(char)
+					ServerEventBus.StatusEffectExpired:Fire(char, effectType)
+				end
+			end
+		end
+		task.wait(0.1)
+	end
+end)
+
+return StatusEffectSystem
+========== ARCHIVO: ./src/ServerScriptService/Systems/SkillManagerService.lua ==========
+
+-- =============================================================================
+-- SkillManagerService.lua
+-- Ubicación: src/server/services/SkillManagerService.lua
+--
+-- Servicio que valida y ejecuta todas las habilidades del juego.
+-- Reemplaza el bloque if/elseif de 900+ líneas en GameManager.lua.
+--
+-- Patrón: Service + Registry (handler map) + Chain of Responsibility (validators)
+-- Principio SOLID:
+--   - Open/Closed: agregar habilidad = registrar handler, NO modificar este servicio.
+--   - Single Responsibility: solo se encarga de routing y validación de skills.
+--   - Dependency Inversion: depende de abstracciones (RemoteRegistry, EventBus).
+-- =============================================================================
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local RemoteRegistry     = require(ReplicatedStorage.Network.RemoteRegistry)
+local ServerEventBus     = require(ServerScriptService.Network.ServerEventBus)
+local GameConstants      = require(ReplicatedStorage.GameConstants)
+local ValidationUtils    = require(ReplicatedStorage.Utils.ValidationUtils)
+local StatusEffectSystem = require(ServerScriptService.Systems.StatusEffectSystem)
+local StatusEffectType   = require(ReplicatedStorage.Enums.StatusEffectType)
+
+-- Importación lazy para evitar ciclos
+local CharacterRegistry
+
+local function getRegistry()
+	if not CharacterRegistry then
+		CharacterRegistry = require(ServerScriptService.Data.CharacterRegistry)
+	end
+	return CharacterRegistry
+end
+
+-- =============================================================================
+-- Estado interno del servicio (Singleton)
+-- =============================================================================
+
+-- { [playerName] = { [skillServerName] = lastUsedTime } }
+local cooldownTracker: {[string]: {[string]: number}} = {}
+
+-- Registro de handlers: { [customHandlerId] = handlerFunction }
+-- Patrón Registry: los handlers se registran en Start(), no están hardcodeados.
+local skillHandlers: {[string]: (ctx: SkillContext) -> ()} = {}
+
+-- Tipo del contexto pasado a cada handler
+export type SkillContext = {
+	player    : Player,
+	char      : Model,
+	root      : BasePart,
+	hum       : Humanoid,
+	skillDef  : table,   -- La AbilityDefinition / SkillDefinition del personaje
+	targetPos : Vector3?,
+	characterId: string,
+}
+
+-- =============================================================================
+-- Servicio principal
+-- =============================================================================
+local SkillManagerService = {}
+
+-- ---------------------------------------------------------------------------
+-- Helpers privados
+-- ---------------------------------------------------------------------------
+
+local function getOrCreateCooldowns(player: Player): {[string]: number}
+	local name = player.Name
+	if not cooldownTracker[name] then
+		cooldownTracker[name] = {}
+	end
+	return cooldownTracker[name]
+end
+
+local function findSkillDef(charConfig: table, serverName: string): table?
+	local skills = charConfig.Skills or charConfig.Abilities
+	if not skills then return nil end
+	for _, skill in ipairs(skills) do
+		if skill.ServerName == serverName then
+			return skill
+		end
+	end
+	return nil
+end
+
+local function validateCast(player: Player, char: Model, skillDef: table, cooldowns: {[string]: number}): (boolean, string)
+	-- Verificar stun
+	if not ValidationUtils.isNotStunned(char) then
+		return false, "stunned"
+	end
+
+	-- Verificar que el personaje esté vivo
+	if not ValidationUtils.isCharacterAlive(player) then
+		return false, "dead"
+	end
+
+	-- Verificar AbilitiesDisabled (invisibilidad de Augusto, etc.)
+	if char:FindFirstChild("AbilitiesDisabled") then
+		return false, "abilities_disabled"
+	end
+
+	-- Verificar cooldown
+	local lastUsed = cooldowns[skillDef.ServerName] or 0
+	local cooldown  = skillDef.Cooldown or 0
+
+	-- One-time-use: buscar si ya fue usado
+	if skillDef.OneTimeUse then
+		local usedTag = char:FindFirstChild(skillDef.ServerName .. "_Used")
+		if usedTag then
+			return false, "one_time_used"
+		end
+	elseif cooldown > 0 and not ValidationUtils.isCooldownReady(lastUsed, cooldown) then
+		return false, "on_cooldown"
+	end
+
+	return true, ""
+end
+
+-- ---------------------------------------------------------------------------
+-- Ejecución pública
+-- ---------------------------------------------------------------------------
+
+--- Intenta ejecutar una habilidad de killer o superviviente.
+--- Llamado desde el OnServerEvent de UseKillerAbility / UseSurvivorAbility.
+---
+--- @param player      Player    Jugador que emitió el evento.
+--- @param serverName  string    Nombre del servidor de la habilidad.
+--- @param targetPos   Vector3?  Posición objetivo (si aplica).
+--- @param role        string    "Killer" | "Survivor"
+function SkillManagerService.cast(player: Player, serverName: string, targetPos: any, role: string)
+	-- 1. Sanear inputs
+	if not ValidationUtils.isValidString(serverName) then
+		warn("[SkillManager] serverName inválido de " .. player.Name)
+		return
+	end
+
+	local safeTarget: Vector3? = nil
+	if typeof(targetPos) == "Vector3" and ValidationUtils.isValidPosition(targetPos) then
+		safeTarget = targetPos
+	end
+
+	-- 2. Obtener personaje
+	local char = player.Character
+	if not char then return end
+
+	local root = char:FindFirstChild("HumanoidRootPart")
+	local hum  = char:FindFirstChild("Humanoid")
+	if not root or not hum then return end
+
+	-- 3. Obtener config del personaje
+	local reg        = getRegistry()
+	local tagName    = (role == "Killer") and "KillerID" or "SurvivorID"
+	local charTag    = char:FindFirstChild(tagName)
+	if not charTag then
+		warn("[SkillManager] " .. player.Name .. " no tiene tag de " .. role)
+		return
+	end
+
+	local characterId  = charTag.Value
+	local charConfig   = (role == "Killer") and reg.getKiller(characterId) or reg.getSurvivor(characterId)
+	if not charConfig then
+		warn("[SkillManager] Config no encontrada para " .. characterId)
+		return
+	end
+
+	-- 4. Encontrar la definición de la habilidad
+	local skillDef = findSkillDef(charConfig, serverName)
+	if not skillDef then
+		warn("[SkillManager] Habilidad '" .. serverName .. "' no encontrada en " .. characterId)
+		return
+	end
+
+	-- 5. Validar que se puede castear
+	local cooldowns = getOrCreateCooldowns(player)
+	local canCast, reason = validateCast(player, char, skillDef, cooldowns)
+	if not canCast then
+		ServerEventBus.SkillRejected:Fire(player, serverName, reason)
+		return
+	end
+
+	-- 6. Registrar uso (cooldown)
+	if not skillDef.OneTimeUse then
+		cooldowns[skillDef.ServerName] = os.clock()
+	else
+		-- Marcar como usado (one-time-use)
+		local usedTag = Instance.new("BoolValue", char)
+		usedTag.Name  = skillDef.ServerName .. "_Used"
+	end
+
+	-- 7. Construir contexto y ejecutar handler
+	local ctx: SkillContext = {
+		player      = player,
+		char        = char,
+		root        = root,
+		hum         = hum,
+		skillDef    = skillDef,
+		targetPos   = safeTarget,
+		characterId = characterId,
+	}
+
+	local handlerId = skillDef.customHandlerId or serverName
+	local handler   = skillHandlers[handlerId]
+
+	if handler then
+		local ok, err = pcall(handler, ctx)
+		if not ok then
+			warn("[SkillManager] Error ejecutando handler '" .. handlerId .. "': " .. tostring(err))
+		end
+	else
+		warn("[SkillManager] No hay handler registrado para '" .. handlerId .. "'")
+	end
+
+	-- 8. Emitir evento al bus (para stats, voz, etc.)
+	ServerEventBus.SkillCasted:Fire(player, serverName)
+end
+
+-- =============================================================================
+-- API de registro de handlers (patrón Registry / Open-Closed)
+-- =============================================================================
+
+--- Registra un handler para una habilidad específica.
+--- Los handlers se registran en los archivos de SkillHandlers/ al iniciar.
+---
+--- @param handlerId  string                   ID único del handler (customHandlerId del config).
+--- @param handler    (ctx: SkillContext) -> () Función que ejecuta la lógica de la habilidad.
+function SkillManagerService.registerHandler(handlerId: string, handler: (ctx: SkillContext) -> ())
+	assert(type(handlerId) == "string" and #handlerId > 0, "[SkillManager] handlerId inválido")
+	assert(type(handler) == "function", "[SkillManager] handler debe ser función")
+
+	if skillHandlers[handlerId] then
+		warn("[SkillManager] Handler '" .. handlerId .. "' sobreescrito. ¿Registro duplicado?")
+	end
+
+	skillHandlers[handlerId] = handler
+end
+
+--- Limpia los cooldowns de un jugador (llamado al reiniciar partida).
+function SkillManagerService.resetCooldowns(player: Player)
+	cooldownTracker[player.Name] = {}
+end
+
+-- =============================================================================
+-- Inicialización del servicio
+-- =============================================================================
+
+function SkillManagerService.Start()
+	-- Conectar RemoteEvents
+	RemoteRegistry.UseKillerAbility.OnServerEvent:Connect(function(player, serverName, targetPos)
+		SkillManagerService.cast(player, serverName, targetPos, "Killer")
+	end)
+
+	RemoteRegistry.UseSurvivorAbility.OnServerEvent:Connect(function(player, serverName, targetPos)
+		SkillManagerService.cast(player, serverName, targetPos, "Survivor")
+	end)
+
+	-- Limpiar cooldowns cuando el jugador se vaya
+	Players.PlayerRemoving:Connect(function(player)
+		cooldownTracker[player.Name] = nil
+	end)
+
+	-- Cargar todos los handlers registrados
+	-- Los handlers se importan aquí para mantener SkillManagerService limpio
+	local handlersFolder = ServerScriptService:FindFirstChild("SkillHandlers")
+	if handlersFolder then
+		for _, module in ipairs(handlersFolder:GetChildren()) do
+			if module:IsA("ModuleScript") then
+				local ok, err = pcall(function()
+					require(module)(SkillManagerService.registerHandler)
+				end)
+				if not ok then
+					warn("[SkillManager] Error cargando handler module '" .. module.Name .. "': " .. tostring(err))
+				end
+			end
+		end
+	end
+
+	print("[SkillManagerService] ✅ Iniciado con " .. #(function()
+		local t = {}
+		for k in pairs(skillHandlers) do table.insert(t, k) end
+		return t
+	end)() .. " handlers registrados")
+end
+
+return SkillManagerService
 ========== ARCHIVO: ./src/ServerScriptService/Services/CombatService.lua ==========
 
 
@@ -138,13 +1982,110 @@ return TimeManagerService
 
 ========== ARCHIVO: ./src/ServerScriptService/Network/ServerEventBus.lua ==========
 
--- src/ServerScriptService/Network/ServerEventBus.lua
+-- =============================================================================
+-- ServerEventBus.lua
+-- Ubicación: src/server/network/ServerEventBus.lua
+--
+-- Bus de eventos interno del servidor. Permite que los servicios se
+-- comuniquen entre sí SIN imports directos (Dependency Inversion).
+--
+-- Patrón: Event Bus / Mediator
+-- Principio SOLID: Dependency Inversion + Open/Closed
+--   - Los servicios dependen del Bus, no entre sí.
+--   - Agregar un nuevo evento = agregar una línea aquí.
+-- =============================================================================
+
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Signal = require(ReplicatedStorage.Packages.Signal)
 
+--- @class ServerEventBus
+--- Todos los eventos internos del servidor con sus signaturas tipadas.
 local ServerEventBus = {
-    -- Creamos un evento de prueba
-    TestPing = Signal.new()
+
+	-- =========================================================================
+	-- 🎮 MATCH FLOW
+	-- =========================================================================
+
+	--- Disparado cuando el estado de la partida cambia.
+	--- Args: (newState: GameState, oldState: GameState)
+	MatchStateChanged = Signal.new(),
+
+	--- Disparado cuando el timer se actualiza (cada segundo).
+	--- Args: (remainingSeconds: number)
+	TimeUpdated = Signal.new(),
+
+	--- Disparado cuando el timer llega a 0.
+	TimeExpired = Signal.new(),
+
+	--- Disparado cuando queda solo 1 superviviente.
+	--- Args: (lastSurvivor: Model, killer: Model)
+	LastManStanding = Signal.new(),
+
+	--- Disparado cuando la música LMS termina su duración.
+	LMSMusicEnded = Signal.new(),
+
+	-- =========================================================================
+	-- ⚔️ COMBATE
+	-- =========================================================================
+
+	--- Disparado cuando un jugador recibe daño.
+	--- Args: (victim: Player, attacker: Player, amount: number, source: string)
+	PlayerDamaged = Signal.new(),
+
+	--- Disparado cuando un superviviente muere.
+	--- Args: (victim: Player, killer: Player?)
+	SurvivorKilled = Signal.new(),
+
+	--- Disparado cuando el killer muere (solo MIGUEL).
+	--- Args: (killer: Player)
+	KillerKilled = Signal.new(),
+
+	--- Disparado cuando se aplica un status effect.
+	--- Args: (target: Model, effectType: StatusEffectType, duration: number)
+	StatusEffectApplied = Signal.new(),
+
+	--- Disparado cuando un status effect expira.
+	--- Args: (target: Model, effectType: StatusEffectType)
+	StatusEffectExpired = Signal.new(),
+
+	-- =========================================================================
+	-- 🎯 HABILIDADES
+	-- =========================================================================
+
+	--- Disparado cuando un personaje usa una habilidad exitosamente.
+	--- Args: (player: Player, skillId: string)
+	SkillCasted = Signal.new(),
+
+	--- Disparado cuando una habilidad es rechazada (cooldown, stun, etc.)
+	--- Args: (player: Player, skillId: string, reason: string)
+	SkillRejected = Signal.new(),
+
+	-- =========================================================================
+	-- 🏃 ESCAPE
+	-- =========================================================================
+
+	--- Disparado cuando un superviviente toca la puerta de salida.
+	--- Args: (player: Player)
+	PlayerEscaped = Signal.new(),
+
+	--- Disparado cuando se abre la puerta de salida.
+	ExitOpened = Signal.new(),
+
+	-- =========================================================================
+	-- 🎵 MÚSICA
+	-- =========================================================================
+
+	--- Disparado cuando el killer entra en rango de chase.
+	--- Args: (killerId: string)
+	ChaseStarted = Signal.new(),
+
+	--- Disparado cuando el killer sale del rango de chase.
+	ChaseEnded = Signal.new(),
+
+	--- Disparado cuando se activa la música LMS.
+	--- Args: (killerId: string, survivorId: string, duration: number)
+	LMSMusicStarted = Signal.new(),
+
 }
 
 return ServerEventBus

@@ -3,11 +3,13 @@ local Services = script.Parent.Services
 
 local TimeManagerService = require(Services.TimeManagerService)
 local MatchManagerService = require(Services.MatchManagerService)
+local RespawnManagerService = require(Services.RespawnManagerService)
 
 print("🚀 Arrancando Servidor de Simio Chase v0.1...")
 
 -- Iniciamos los servicios (el orden importa si uno depende del otro)
 TimeManagerService.Start()
 MatchManagerService.Start()
+RespawnManagerService.Start()
 
 print("✅ Servidor inicializado con éxito.")
