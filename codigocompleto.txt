@@ -11,16 +11,912 @@ rojo = "rojo-rbx/rojo@7.6.1"
 
 ========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/MatchUIController.lua ==========
 
+-- src/StarterPlayer/StarterPlayerScripts/Controllers/MatchUIController.lua
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+-- Importamos el puente de red
+local RemoteRegistry = require(ReplicatedStorage.Network.RemoteRegistry)
+
+local MatchUIController = {}
+
+function MatchUIController.Start()
+    print("🖥️ [MatchUIController] Iniciado en el Cliente.")
+    
+    local player = Players.LocalPlayer
+    local playerGui = player:WaitForChild("PlayerGui")
+    
+    -- 1. Creamos la UI de daño programáticamente
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "DamageUI"
+    screenGui.IgnoreGuiInset = true -- Ignora el menú de Roblox para cubrir toda la pantalla
+    screenGui.Parent = playerGui
+    
+    local damageFrame = Instance.new("Frame")
+    damageFrame.Size = UDim2.new(1, 0, 1, 0)
+    damageFrame.BackgroundColor3 = Color3.fromRGB(255, 0, 0) -- Rojo sangre
+    damageFrame.BackgroundTransparency = 1 -- 100% invisible por defecto
+    damageFrame.Parent = screenGui
+    
+    -- 2. Escuchamos el grito del Servidor
+    RemoteRegistry.DamageEffect.OnClientEvent:Connect(function()
+        -- Animación fluida (Tween) para que parpadee
+        local tweenIn = TweenService:Create(damageFrame, TweenInfo.new(0.1), {BackgroundTransparency = 0.5})
+        local tweenOut = TweenService:Create(damageFrame, TweenInfo.new(0.4), {BackgroundTransparency = 1})
+        
+        tweenIn:Play()
+        tweenIn.Completed:Wait() -- Esperamos que termine de ponerse rojo
+        tweenOut:Play() -- Lo volvemos invisible
+    end)
+end
+
+return MatchUIController
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/GameHUDController.lua ==========
+
+-- src/StarterPlayer/StarterPlayerScripts/Controllers/GameHUDController.lua
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ClientEventBus = require(script.Parent.Parent.Network.ClientEventBus)
+local GameState      = require(ReplicatedStorage.Enums.GameState)
+
+local GameHUDController = {}
+
+local activeUI: ScreenGui? = nil
+
+-- ✅ Guardamos todas las conexiones internas de la UI activa aquí.
+-- Al destruir la UI, las desconectamos todas para no tener memory leaks.
+local _uiConnections: {RBXScriptConnection} = {}
+
+-- =============================================================================
+-- Helper: formato MM:SS
+-- =============================================================================
+
+local function formatTime(seconds: number): string
+	seconds = math.max(0, math.floor(seconds))
+	local m = math.floor(seconds / 60)
+	local s = seconds % 60
+	return string.format("%02d:%02d", m, s)
+end
+
+-- =============================================================================
+-- Destruir UI y limpiar conexiones
+-- =============================================================================
+
+local function destroyUI()
+	-- ✅ Desconectar todos los listeners ligados a esta UI
+	for _, conn in ipairs(_uiConnections) do
+		conn:Disconnect()
+	end
+	table.clear(_uiConnections)
+
+	if activeUI then
+		activeUI:Destroy()
+		activeUI = nil
+	end
+end
+
+-- =============================================================================
+-- Construir UI para un estado dado
+-- =============================================================================
+
+local function buildUI(state: string)
+	-- Siempre partir de cero limpio para evitar duplicados
+	destroyUI()
+
+	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+
+	activeUI = Instance.new("ScreenGui")
+	activeUI.Name = "GameHUD"
+	activeUI.IgnoreGuiInset = true
+	activeUI.ResetOnSpawn = false  -- ✅ Sobrevive al respawn del personaje
+	activeUI.Parent = playerGui
+
+	-- Barra superior
+	local topBar = Instance.new("Frame")
+	topBar.Name = "TopBar"
+	topBar.Size = UDim2.new(1, 0, 0, 56)
+	topBar.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
+	topBar.BackgroundTransparency = 0.25
+	topBar.BorderSizePixel = 0
+	topBar.Parent = activeUI
+
+	-- Label de estado (izquierda)
+	local statusLabel = Instance.new("TextLabel")
+	statusLabel.Name = "StatusLabel"
+	statusLabel.Size = UDim2.new(0.65, -8, 1, 0)
+	statusLabel.Position = UDim2.new(0, 16, 0, 0)
+	statusLabel.BackgroundTransparency = 1
+	statusLabel.Font = Enum.Font.GothamBold
+	statusLabel.TextSize = 22
+	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+	statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+	statusLabel.Parent = topBar
+
+	-- Label del timer (derecha)
+	local timerLabel = Instance.new("TextLabel")
+	timerLabel.Name = "TimerLabel"
+	timerLabel.Size = UDim2.new(0.35, -16, 1, 0)
+	timerLabel.Position = UDim2.new(0.65, 8, 0, 0)
+	timerLabel.BackgroundTransparency = 1
+	timerLabel.Font = Enum.Font.GothamBold
+	timerLabel.TextSize = 26
+	timerLabel.TextXAlignment = Enum.TextXAlignment.Right
+	timerLabel.TextColor3 = Color3.fromRGB(255, 220, 80)
+	timerLabel.Text = "--:--"
+	timerLabel.Parent = topBar
+
+	-- Configurar texto y colores según el estado
+	if state == GameState.LOBBY then
+		statusLabel.Text = "⏳  ESPERANDO EN LOBBY..."
+		statusLabel.TextColor3 = Color3.fromRGB(100, 255, 120)
+		timerLabel.TextColor3  = Color3.fromRGB(100, 255, 120)
+
+	elseif state == GameState.PLAYING then
+		statusLabel.Text = "⚔️  ¡SOBREVIVE!"
+		statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+		timerLabel.TextColor3  = Color3.fromRGB(255, 220, 80)
+
+	elseif state == GameState.LAST_MAN then
+		statusLabel.Text = "🔥  ÚLTIMO EN PIE"
+		statusLabel.TextColor3 = Color3.fromRGB(255, 160, 30)
+		timerLabel.TextColor3  = Color3.fromRGB(255, 160, 30)
+	end
+
+	-- ✅ Conectar el timer y guardar la conexión para poder limpiarla luego
+	local timerConn = ClientEventBus.TimeUpdated:Connect(function(remaining: number)
+		-- Verificar que la UI sigue viva antes de tocarla
+		if timerLabel and timerLabel.Parent then
+			timerLabel.Text = formatTime(remaining)
+
+			-- Urgencia visual: rojo cuando quedan ≤ 30 segundos
+			if remaining <= 30 then
+				timerLabel.TextColor3 = Color3.fromRGB(255, 60, 60)
+			end
+		end
+	end)
+	table.insert(_uiConnections, timerConn)
+end
+
+-- =============================================================================
+-- Start
+-- =============================================================================
+
+function GameHUDController.Start()
+	print("🖥️ [GameHUDController] Iniciado.")
+
+	-- Esta conexión vive para siempre (es el listener maestro del controlador).
+	-- No va en _uiConnections porque no debe destruirse entre fases.
+	ClientEventBus.MatchStateChanged:Connect(function(newState: string)
+		if newState == GameState.LOBBY
+		or newState == GameState.PLAYING
+		or newState == GameState.LAST_MAN then
+			buildUI(newState)
+		else
+			-- SELECTING, ENDING, INTERMISSION, WAITING → limpiar HUD
+			destroyUI()
+		end
+	end)
+end
+
+return GameHUDController
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/CharacterSelectionController.lua ==========
+
+-- src/StarterPlayer/StarterPlayerScripts/Controllers/CharacterSelectionController.lua
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RemoteRegistry = require(ReplicatedStorage.Network.RemoteRegistry)
+local ClientEventBus = require(script.Parent.Parent.Network.ClientEventBus)
+local GameState = require(ReplicatedStorage.Enums.GameState)
+
+local CharacterSelectionController = {}
+
+-- Hardcodeamos el catálogo para la UI rápida (puedes leerlo dinámicamente luego)
+local CATALOG = {
+    { role = "Killer", id = "AUGUSTO" },
+    { role = "Killer", id = "DANTE" },
+    { role = "Killer", id = "EMANUEL" },
+    { role = "Killer", id = "JALY" },
+    { role = "Killer", id = "MIGUEL" },
+    { role = "Killer", id = "PORO" },
+    { role = "Survivor", id = "CACHETES" },
+    { role = "Survivor", id = "GONZACARBON" },
+    { role = "Survivor", id = "NARIZTOTELES" },
+    { role = "Survivor", id = "RICALY" },
+    { role = "Survivor", id = "SIU" },
+    { role = "Survivor", id = "SURI" },
+    { role = "Survivor", id = "VACUMING" },
+}
+
+local currentIndex = 1
+local activeUI = nil
+
+function CharacterSelectionController.Start()
+    print("🖥️ [SelectionController] Listo para la fase de selección.")
+    
+    -- Escuchamos al servidor para saber cuándo abrir la UI
+    ClientEventBus.MatchStateChanged:Connect(function(state)
+        if state == GameState.SELECTING then
+            CharacterSelectionController._showUI()
+        elseif state == GameState.PLAYING then
+            CharacterSelectionController._hideUI()
+        end
+    end)
+end
+
+function CharacterSelectionController._showUI()
+    if activeUI then return end
+    
+    local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+    
+    -- Fondo principal
+    activeUI = Instance.new("ScreenGui", playerGui)
+    activeUI.Name = "SelectionScreen"
+    activeUI.IgnoreGuiInset = true
+    
+    local bg = Instance.new("Frame", activeUI)
+    bg.Size = UDim2.new(1, 0, 1, 0)
+    bg.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    
+    -- Nombre del Personaje
+    local nameLabel = Instance.new("TextLabel", bg)
+    nameLabel.Size = UDim2.new(1, 0, 0.2, 0)
+    nameLabel.Position = UDim2.new(0, 0, 0.3, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Font = Enum.Font.GothamBlack
+    nameLabel.TextSize = 80
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    
+    -- Rol del Personaje
+    local roleLabel = Instance.new("TextLabel", bg)
+    roleLabel.Size = UDim2.new(1, 0, 0.1, 0)
+    roleLabel.Position = UDim2.new(0, 0, 0.5, 0)
+    roleLabel.BackgroundTransparency = 1
+    roleLabel.Font = Enum.Font.GothamMedium
+    roleLabel.TextSize = 40
+    roleLabel.TextColor3 = Color3.fromRGB(200, 50, 50)
+    
+    -- Función para actualizar los textos
+    local function updateDisplay()
+        local currentData = CATALOG[currentIndex]
+        nameLabel.Text = currentData.id
+        roleLabel.Text = currentData.role
+        roleLabel.TextColor3 = (currentData.role == "Killer") and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 200, 255)
+    end
+    updateDisplay()
+    
+    -- Botón Izquierda (<)
+    local leftBtn = Instance.new("TextButton", bg)
+    leftBtn.Size = UDim2.new(0, 100, 0, 100)
+    leftBtn.Position = UDim2.new(0.2, 0, 0.4, 0)
+    leftBtn.Text = "<"
+    leftBtn.TextSize = 80
+    leftBtn.BackgroundTransparency = 1
+    leftBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    
+    leftBtn.MouseButton1Click:Connect(function()
+        currentIndex = (currentIndex - 2) % #CATALOG + 1
+        updateDisplay()
+    end)
+    
+    -- Botón Derecha (>)
+    local rightBtn = Instance.new("TextButton", bg)
+    rightBtn.Size = UDim2.new(0, 100, 0, 100)
+    rightBtn.Position = UDim2.new(0.8, -100, 0.4, 0)
+    rightBtn.Text = ">"
+    rightBtn.TextSize = 80
+    rightBtn.BackgroundTransparency = 1
+    rightBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    
+    rightBtn.MouseButton1Click:Connect(function()
+        currentIndex = currentIndex % #CATALOG + 1
+        updateDisplay()
+    end)
+    
+    -- Botón Confirmar
+    local confirmBtn = Instance.new("TextButton", bg)
+    confirmBtn.Size = UDim2.new(0, 300, 0, 80)
+    confirmBtn.Position = UDim2.new(0.5, -150, 0.7, 0)
+    confirmBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+    confirmBtn.Text = "CONFIRMAR SELECCIÓN"
+    confirmBtn.Font = Enum.Font.GothamBold
+    confirmBtn.TextSize = 25
+    confirmBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    
+    confirmBtn.MouseButton1Click:Connect(function()
+        local selected = CATALOG[currentIndex]
+        RemoteRegistry.SelectCharacter:FireServer(selected.role, selected.id)
+        confirmBtn.Text = "¡SELECCIONADO!"
+        confirmBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+    end)
+end
+
+function CharacterSelectionController._hideUI()
+    if activeUI then
+        activeUI:Destroy()
+        activeUI = nil
+    end
+end
+
+return CharacterSelectionController
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/CharacterAnimationController.lua ==========
+
+-- =============================================================================
+-- CharacterAnimationController.lua
+-- Ubicación: src/StarterPlayer/StarterPlayerScripts/Controllers/CharacterAnimationController.lua
+--
+-- Maneja animaciones y cámara de personajes custom.
+--
+-- Estrategia de animaciones:
+--   Si el modelo tiene HumanoidDescription → usamos ApplyDescription().
+--   Roblox carga automáticamente todas las animaciones del Description
+--   (Idle, Walk, Run, Jump, Fall, Climb, Swim) sin que tengamos que
+--   gestionar los tracks manualmente.
+--
+--   Si NO tiene HumanoidDescription → fallback manual con GameConstants.
+-- =============================================================================
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RemoteRegistry = require(ReplicatedStorage.Network.RemoteRegistry)
+local GameConstants  = require(ReplicatedStorage.GameConstants)
+
+local CharacterAnimationController = {}
+
+-- Conexiones y tracks del sistema de animación manual (fallback).
+-- Solo se usan si el modelo no tiene HumanoidDescription.
+local _activeConnections: {RBXScriptConnection} = {}
+local _activeAnimations:  {AnimationTrack}      = {}
+
+-- =============================================================================
+-- Limpieza del sistema manual
+-- =============================================================================
+
+local function cleanupManual()
+    for _, track in ipairs(_activeAnimations) do
+        if track.IsPlaying then track:Stop(0) end
+    end
+    table.clear(_activeAnimations)
+
+    for _, conn in ipairs(_activeConnections) do
+        conn:Disconnect()
+    end
+    table.clear(_activeConnections)
+end
+
+-- =============================================================================
+-- Estrategia A: HumanoidDescription (preferida)
+--
+-- El modelo PORO ya incluye un HumanoidDescription con sus propios IDs
+-- de animación. Humanoid:ApplyDescription() los aplica todos de golpe
+-- y Roblox gestiona la máquina de estados de animación por nosotros.
+-- Los IDs del Description pertenecen al creador del modelo, por eso cargan.
+-- =============================================================================
+
+local function applyDescriptionAnimations(humanoid: Humanoid, description: HumanoidDescription): boolean
+    local ok, err = pcall(function()
+        humanoid:ApplyDescription(description)
+    end)
+
+    if ok then
+        print("🎬 [AnimController] HumanoidDescription aplicado correctamente.")
+    else
+        warn("[AnimController] ApplyDescription falló: " .. tostring(err))
+    end
+
+    return ok
+end
+
+-- =============================================================================
+-- Estrategia B: Animación manual con Animator (fallback)
+--
+-- Se usa cuando el modelo no tiene HumanoidDescription.
+-- Lee los IDs de GameConstants y maneja la máquina de estados con Heartbeat.
+-- =============================================================================
+
+local function setupManualAnimations(humanoid: Humanoid, animator: Animator)
+    cleanupManual()
+
+    local anims = GameConstants.Animations.Shared
+
+    local function loadTrack(animId: string): AnimationTrack?
+        if not animId or animId == "" then return nil end
+        local anim     = Instance.new("Animation")
+        anim.AnimationId = animId
+        local ok, track = pcall(function()
+            return animator:LoadAnimation(anim)
+        end)
+        anim:Destroy()
+        if ok and track then
+            table.insert(_activeAnimations, track)
+            return track
+        end
+        return nil
+    end
+
+    local trackIdle = loadTrack(anims.Idle)
+    local trackWalk = loadTrack(anims.Walk)
+    local trackRun  = loadTrack(anims.Run)
+    local trackJump = loadTrack(anims.Jump)
+
+    if trackIdle then trackIdle.Priority = Enum.AnimationPriority.Idle     end
+    if trackWalk then trackWalk.Priority = Enum.AnimationPriority.Movement end
+    if trackRun  then trackRun.Priority  = Enum.AnimationPriority.Movement end
+    if trackJump then trackJump.Priority = Enum.AnimationPriority.Action   end
+
+    if trackIdle then trackIdle:Play() end
+
+    local heartbeatConn = game:GetService("RunService").Heartbeat:Connect(function()
+        if not humanoid.Parent then
+            cleanupManual()
+            return
+        end
+
+        local speed    = humanoid.MoveDirection.Magnitude
+        local state    = humanoid:GetState()
+        local walkSpd  = humanoid.WalkSpeed
+
+        local isJumping = (state == Enum.HumanoidStateType.Jumping
+                        or state == Enum.HumanoidStateType.Freefall)
+        local isMoving  = speed > 0.1
+        local isRunning = isMoving and walkSpd > (GameConstants.Movement.DEFAULT_WALK_SPEED + 2)
+
+        if isJumping then
+            if trackJump and not trackJump.IsPlaying then
+                if trackIdle then trackIdle:Stop(0.1) end
+                if trackWalk then trackWalk:Stop(0.1) end
+                if trackRun  then trackRun:Stop(0.1)  end
+                trackJump:Play(0.1)
+            end
+            return
+        end
+
+        if trackJump and trackJump.IsPlaying then
+            trackJump:Stop(0.2)
+        end
+
+        if isRunning then
+            if trackRun and not trackRun.IsPlaying then
+                if trackIdle then trackIdle:Stop(0.1) end
+                if trackWalk then trackWalk:Stop(0.1) end
+                trackRun:Play(0.1)
+            end
+        elseif isMoving then
+            if trackWalk and not trackWalk.IsPlaying then
+                if trackIdle then trackIdle:Stop(0.1) end
+                if trackRun  then trackRun:Stop(0.1)  end
+                trackWalk:Play(0.1)
+            end
+        else
+            if trackIdle and not trackIdle.IsPlaying then
+                if trackWalk then trackWalk:Stop(0.1) end
+                if trackRun  then trackRun:Stop(0.1)  end
+                trackIdle:Play(0.1)
+            end
+        end
+    end)
+
+    table.insert(_activeConnections, heartbeatConn)
+    print("🎬 [AnimController] Animaciones manuales (fallback) cargadas.")
+end
+
+-- =============================================================================
+-- Setup principal: decide qué estrategia usar
+-- =============================================================================
+
+local function setupCharacter(character: Model)
+    cleanupManual()
+
+    local humanoid = character:WaitForChild("Humanoid", 5) :: Humanoid?
+    if not humanoid then
+        warn("[AnimController] Humanoid no encontrado en " .. character.Name)
+        return
+    end
+
+    -- Configurar cámara
+    local camera = workspace.CurrentCamera
+    if camera then
+        camera.CameraSubject = humanoid
+        camera.CameraType    = Enum.CameraType.Follow
+    end
+
+    -- ✅ Buscar HumanoidDescription dentro del modelo
+    -- PORO lo tiene; si otros modelos no lo tienen, caemos al fallback.
+    local description = character:FindFirstChildOfClass("HumanoidDescription")
+
+    if description then
+        -- Estrategia A: el modelo trae sus propias animaciones
+        -- ApplyDescription necesita que el Humanoid ya esté en el Workspace,
+        -- así que esperamos un frame antes de llamarlo.
+        task.defer(function()
+            if character.Parent and humanoid.Parent then
+                local ok = applyDescriptionAnimations(humanoid, description)
+                if not ok then
+                    -- Si ApplyDescription falla, intentar carga manual
+                    local animator = humanoid:FindFirstChildOfClass("Animator")
+                    if animator then
+                        setupManualAnimations(humanoid, animator)
+                    end
+                end
+            end
+        end)
+    else
+        -- Estrategia B: fallback con IDs de GameConstants
+        local animator = humanoid:FindFirstChildOfClass("Animator")
+        if not animator then
+            -- El servidor debería haberlo inyectado, pero por si acaso
+            animator = Instance.new("Animator")
+            animator.Parent = humanoid
+        end
+        setupManualAnimations(humanoid, animator)
+    end
+
+    print("🎬 [AnimController] Setup completado para " .. character.Name)
+end
+
+-- =============================================================================
+-- Start
+-- =============================================================================
+
+function CharacterAnimationController.Start()
+    print("🎬 [AnimController] Iniciado.")
+
+    local player = Players.LocalPlayer
+
+    -- Personajes custom de partida: el servidor dispara SetupCharacter
+    RemoteRegistry.SetupCharacter.OnClientEvent:Connect(function()
+        local character = player.Character
+        if not character then
+            character = player.CharacterAdded:Wait()
+        end
+        setupCharacter(character)
+    end)
+
+    -- Personajes de Lobby (LoadCharacter): Roblox inyecta Animate automáticamente,
+    -- solo necesitamos asegurar que la cámara apunte al Humanoid correcto.
+    player.CharacterAdded:Connect(function(character)
+        local humanoid = character:WaitForChild("Humanoid", 5)
+        local camera   = workspace.CurrentCamera
+        if humanoid and camera then
+            if camera.CameraSubject ~= humanoid then
+                camera.CameraSubject = humanoid
+                camera.CameraType    = Enum.CameraType.Follow
+            end
+        end
+    end)
+end
+
+return CharacterAnimationController
 ========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/InputController.lua ==========
 
 
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/RespawnUIController.lua ==========
+
+-- src/StarterPlayer/StarterPlayerScripts/Controllers/RespawnUIController.lua
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RemoteRegistry = require(ReplicatedStorage.Network.RemoteRegistry)
+
+local RespawnUIController = {}
+local activeUI = nil
+local countdownConnection = nil
+
+function RespawnUIController.Start()
+    print("🖥️ [RespawnUIController] Listo para mostrar menú de muerte.")
+    
+    RemoteRegistry.ShowRespawnMenu.OnClientEvent:Connect(function(timeLimit)
+        RespawnUIController._showUI(timeLimit)
+    end)
+end
+
+function RespawnUIController._showUI(timeLimit: number)
+    local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+    
+    -- Destruimos la anterior si por algún bug se duplicó
+    if activeUI then activeUI:Destroy() end
+    
+    -- 1. Crear el GUI (Fondo negro semi-transparente)
+    activeUI = Instance.new("ScreenGui")
+    activeUI.Name = "RespawnMenu"
+    activeUI.IgnoreGuiInset = true
+    activeUI.Parent = playerGui
+    
+    local background = Instance.new("Frame", activeUI)
+    background.Size = UDim2.new(1, 0, 1, 0)
+    background.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    background.BackgroundTransparency = 0.5
+    
+    -- 2. Título de Muerte
+    local title = Instance.new("TextLabel", background)
+    title.Size = UDim2.new(1, 0, 0.3, 0)
+    title.Position = UDim2.new(0, 0, 0.2, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "HAS MUERTO"
+    title.TextColor3 = Color3.fromRGB(255, 50, 50)
+    title.Font = Enum.Font.GothamBlack
+    title.TextSize = 60
+    
+    -- 3. Botón de Revivir
+    local respawnBtn = Instance.new("TextButton", background)
+    respawnBtn.Size = UDim2.new(0, 300, 0, 60)
+    respawnBtn.Position = UDim2.new(0.5, -150, 0.6, 0)
+    respawnBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    respawnBtn.Text = "VOLVER A JUGAR"
+    respawnBtn.Font = Enum.Font.GothamBold
+    respawnBtn.TextSize = 25
+    
+    -- 4. Texto del Contador
+    local timerText = Instance.new("TextLabel", background)
+    timerText.Size = UDim2.new(1, 0, 0.1, 0)
+    timerText.Position = UDim2.new(0, 0, 0.75, 0)
+    timerText.BackgroundTransparency = 1
+    timerText.TextColor3 = Color3.fromRGB(200, 200, 200)
+    timerText.Font = Enum.Font.GothamMedium
+    timerText.TextSize = 20
+    
+    -- 5. Lógica del Botón
+    respawnBtn.MouseButton1Click:Connect(function()
+        RemoteRegistry.RequestRespawn:FireServer()
+        RespawnUIController._cleanup()
+    end)
+    
+    -- 6. Bucle del Contador (Usando Heartbeat para mejor rendimiento que un while wait)
+    local startTime = os.clock()
+    countdownConnection = RunService.Heartbeat:Connect(function()
+        local elapsed = os.clock() - startTime
+        local remaining = math.max(0, math.ceil(timeLimit - elapsed))
+        timerText.Text = "Serás expulsado en: " .. remaining .. "s"
+        
+        if remaining <= 0 then
+            RespawnUIController._cleanup()
+        end
+    end)
+end
+
+function RespawnUIController._cleanup()
+    if countdownConnection then
+        countdownConnection:Disconnect()
+        countdownConnection = nil
+    end
+    if activeUI then
+        activeUI:Destroy()
+        activeUI = nil
+    end
+end
+
+return RespawnUIController
 ========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Controllers/CameraController.lua ==========
 
 
 ========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/Network/ClientEventBus.lua ==========
 
+-- src/StarterPlayer/StarterPlayerScripts/Network/ClientEventBus.lua
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Signal         = require(ReplicatedStorage.Packages.Signal)
+local RemoteRegistry = require(ReplicatedStorage.Network.RemoteRegistry)
+
+local ClientEventBus = {
+	-- Traduce el RemoteEvent de estado a una señal local
+	MatchStateChanged = Signal.new(),
+
+	-- ✅ Traduce el tick de tiempo del servidor a una señal local
+	TimeUpdated = Signal.new(),
+}
+
+-- Puente: servidor → cliente para estado de partida
+RemoteRegistry.UpdateGameState.OnClientEvent:Connect(function(newState)
+	ClientEventBus.MatchStateChanged:Fire(newState)
+end)
+
+-- ✅ Puente: servidor → cliente para el timer
+RemoteRegistry.TimeUpdated.OnClientEvent:Connect(function(remaining)
+	ClientEventBus.TimeUpdated:Fire(remaining)
+end)
+
+return ClientEventBus
+========== ARCHIVO: ./src/StarterPlayer/StarterPlayerScripts/ClientMain.client.lua ==========
+
+-- src/StarterPlayer/StarterPlayerScripts/ClientMain.client.lua
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Controllers = script.Parent:WaitForChild("Controllers")
+
+local CharacterSelectionController  = require(Controllers:WaitForChild("CharacterSelectionController"))
+local MatchUIController             = require(Controllers:WaitForChild("MatchUIController"))
+local RespawnUIController           = require(Controllers:WaitForChild("RespawnUIController"))
+local GameHUDController             = require(Controllers:WaitForChild("GameHUDController"))
+local CharacterAnimationController  = require(Controllers:WaitForChild("CharacterAnimationController"))
+
+print("🚀 Arrancando Cliente de Simio Chase v0.1...")
+
+CharacterSelectionController.Start()
+MatchUIController.Start()
+GameHUDController.Start()
+RespawnUIController.Start()
+CharacterAnimationController.Start()  -- ✅ maneja cámara + animaciones de custom chars
+
+print("✅ Cliente inicializado con éxito.")
+========== ARCHIVO: ./src/ReplicatedStorage/GameConstants.lua ==========
+
+-- =============================================================================
+-- GameConstants.lua
+-- Ubicación: src/ReplicatedStorage/GameConstants.lua
+--
+-- ÚNICA fuente de verdad para todas las constantes del juego.
+--
+-- FIX BUG 2: DEBUG_MODE era una variable global inexistente en Roblox.
+-- Se define aquí como local ANTES de usarse. Para activar el modo debug
+-- en Studio, cambiar DEBUG_MODE = true. Para producción, false.
+-- =============================================================================
+
+-- ⚠️  CAMBIAR ESTO PARA PRODUCCIÓN
+local DEBUG_MODE = true
+
+local GameConstants = {
+
+    -- =========================================================================
+    -- ⏱️ MATCH TIMING
+    -- =========================================================================
+    Match = {
+        -- FIX: antes era DEBUG_MODE and 1 or 2, donde DEBUG_MODE = nil global
+        -- Ahora DEBUG_MODE es una variable local real con valor explícito.
+        MIN_PLAYERS          = DEBUG_MODE and 1 or 2,
+        LOBBY_COUNTDOWN      = DEBUG_MODE and 3 or 40,
+        BASE_TIME_PER_PLAYER = 120,
+        KILL_BONUS_TIME      = 30,
+        EXIT_OPEN_THRESHOLD  = 60,
+        INTERMISSION_TIME    = DEBUG_MODE and 2 or 8,
+        BOT_HEALTH           = 100,
+    },
+
+    -- =========================================================================
+    -- 🎵 MÚSICA LMS
+    -- =========================================================================
+    LMS = {
+        DEFAULT_DURATION = 160,
+        Combinations = {
+            GONZACARBON_DANTE     = 240,
+            DANTE_NARIZTOTELES    = 266,
+            GONZACARBON_PORO      = 235,
+            NARIZTOTELES_PORO     = 280,
+            VACUMING_DANTE        = 180,
+            SURI_PORO             = 220,
+            EMANUEL_NARIZTOTELES  = 175,
+            SIU_DANTE             = 175,
+            RICALY_PORO           = 175,
+        },
+    },
+
+    -- =========================================================================
+    -- 🎵 IDs DE MÚSICA
+    -- =========================================================================
+    Music = {
+        Lobby = "rbxassetid://83197620419872",
+        Chase = {
+            PORO    = "rbxassetid://140027648193529",
+            DANTE   = "rbxassetid://1839246711",
+            JALY    = "rbxassetid://1842987785",
+            AUGUSTO = "rbxassetid://1848354536",
+            MIGUEL  = "rbxassetid://1848354536",
+            EMANUEL = "rbxassetid://1848354536",
+        },
+        LMS = {
+            GONZACARBON_DANTE    = "rbxassetid://88734539401740",
+            DANTE_NARIZTOTELES   = "rbxassetid://136280306824349",
+            GONZACARBON_PORO     = "rbxassetid://118507138936517",
+            NARIZTOTELES_PORO    = "rbxassetid://115650577425932",
+            VACUMING_DANTE       = "rbxassetid://110590716157779",
+            SURI_PORO            = "rbxassetid://139041776771213",
+            EMANUEL_NARIZTOTELES = "rbxassetid://1839889424",
+            SIU_DANTE            = "rbxassetid://1839889424",
+            RICALY_PORO          = "rbxassetid://1839889424",
+            Default              = "rbxassetid://72530471129415",
+        },
+    },
+
+    -- =========================================================================
+    -- 🎮 HITBOX / COMBAT
+    -- =========================================================================
+    Combat = {
+        DEFAULT_HITBOX_SIZE   = Vector3.new(6, 7, 7),
+        DEFAULT_HITBOX_OFFSET = Vector3.new(0, 0, -3.5),
+        HITBOX_DURATION       = 0.3,
+        EXECUTE_HP_THRESHOLD  = 0.3,
+        IFRAMES_FADE_TIME     = 0.1,
+        IFRAMES_TRANSPARENCY  = 0.4,
+        STUN_DAMAGE_TO_MIGUEL = 25,
+    },
+
+    -- =========================================================================
+    -- 🏃 MOVEMENT
+    -- =========================================================================
+    Movement = {
+        DEFAULT_WALK_SPEED  = 16,
+        DEFAULT_RUN_SPEED   = 24,
+        DEFAULT_JUMP_POWER  = 50,
+        CROUCH_SPEED        = 8,
+        DOUBLE_JUMP_IMPULSE = 60,
+    },
+
+    -- =========================================================================
+    -- ⚡ STAMINA
+    -- =========================================================================
+    Stamina = {
+        DRAIN_RATE        = 25,
+        REGEN_RATE        = 15,
+        DEPLETED_COOLDOWN = 3,
+        LOW_THRESHOLD     = 0.3,
+    },
+
+    -- =========================================================================
+    -- 🌍 SPAWN / LOBBY
+    -- =========================================================================
+    Spawn = {
+        LOBBY_RADIUS    = 50,
+        SURVIVOR_SPREAD = 5,
+        LOBBY_Y_OFFSET  = 5,
+    },
+
+    -- =========================================================================
+    -- 🎭 EFECTOS VISUALES
+    -- =========================================================================
+    VFX = {
+        CHASE_FOG_END        = 150,
+        NORMAL_FOG_END       = 100000,
+        ESCAPE_TINT          = Color3.fromRGB(255, 240, 150),
+        CHASE_AMBIENT        = Color3.fromRGB(5, 5, 5),
+        NORMAL_AMBIENT       = Color3.fromRGB(0, 0, 0),
+        RAGE_BALL_DURATION   = 0.5,
+        HIGHLIGHT_FILL_TRANS = 0.5,
+    },
+
+    -- =========================================================================
+    -- 📡 NETWORKING
+    -- =========================================================================
+    Network = {
+        MAX_REMOTE_RATE     = 10,
+        ABILITY_VALIDATE_MS = 100,
+    },
+
+    -- =========================================================================
+    -- 🎤 AUDIO
+    -- =========================================================================
+    Audio = {
+        LOBBY_VOLUME  = 0.4,
+        CHASE_VOLUME  = 0.6,
+        LMS_VOLUME    = 0.7,
+        VOICE_VOLUME  = 0.8,
+        TICK_VOLUME   = 0.3,
+    },
+
+    -- =========================================================================
+    -- 🔧 ANIMACIONES
+    -- =========================================================================
+    Animations = {
+        Shared = {
+-- ⚠️ IDs temporales para pruebas en Studio sin publicar.
+        -- Reemplazar por los IDs propios después de publicar el juego.
+        Idle        = "rbxassetid://180435571",
+        Walk        = "rbxassetid://180426354",
+        Run         = "rbxassetid://161006061",
+        Jump        = "rbxassetid://125750702",
+        WalkInjured = "rbxassetid://180436148",  -- usando Fall como placeholder
+        RunInjured  = "rbxassetid://161006061",  -- mismo que Run por ahora
+        },
+    },
+}
+
+return table.freeze(GameConstants)
 ========== ARCHIVO: ./src/ReplicatedStorage/Utils/ValidationUtils.lua ==========
 
 -- =============================================================================
@@ -228,6 +1124,18 @@ function Signal:Destroy()
 end
 
 return Signal
+========== ARCHIVO: ./src/ReplicatedStorage/Assets/Maps/init.meta.json ==========
+
+{"ignoreUnknownInstances": true}
+
+========== ARCHIVO: ./src/ReplicatedStorage/Assets/Characters/Survivors/init.meta.json ==========
+
+{"ignoreUnknownInstances": true}
+
+========== ARCHIVO: ./src/ReplicatedStorage/Assets/Characters/Killers/init.meta.json ==========
+
+{"ignoreUnknownInstances": true}
+
 ========== ARCHIVO: ./src/ReplicatedStorage/Network/RemoteRegistry.lua ==========
 
 -- =============================================================================
@@ -304,6 +1212,18 @@ local RemoteRegistry = {
 	--- Avisar inicio de LMS. Args: (killerId: string, survivorId: string)
 	LMSStart = getOrCreateRemote(eventsFolder, "LMSStart"),
 
+	--- Server → Client: Mostrar menú de respawn. Args: (timeLimit: number)
+	ShowRespawnMenu = getOrCreateRemote(eventsFolder, "ShowRespawnMenu"),
+
+	--- Client → Server: El jugador pide revivir.
+	RequestRespawn = getOrCreateRemote(eventsFolder, "RequestRespawn"),
+
+	--- Server → Client: Notificar al cliente que su Character cambió y debe reasignar cámara.
+	SetupCharacter = getOrCreateRemote(eventsFolder, "SetupCharacter"),
+	
+	--- Server → Client: Tick de tiempo cada segundo. Args: (remaining: number)
+	TimeUpdated = getOrCreateRemote(eventsFolder, "TimeUpdated"),
+
 	-- =========================================================================
 	-- ⚔️ COMBATE (Client → Server y Server → Client)
 	-- =========================================================================
@@ -376,7 +1296,7 @@ local RemoteRegistry = {
 }
 
 return RemoteRegistry
-========== ARCHIVO: ./src/ReplicatedStorage/Enums/StatusEffects.lua ==========
+========== ARCHIVO: ./src/ReplicatedStorage/Enums/StatusEffectType.lua ==========
 
 -- =============================================================================
 -- StatusEffectType.lua
@@ -663,9 +1583,6 @@ function CharacterModel.newKiller(data: table): KillerCharacter
 end
 
 return CharacterModel
-========== ARCHIVO: ./src/ServerScriptService/Data/GameConstants.lua ==========
-
-
 ========== ARCHIVO: ./src/ServerScriptService/Data/CharacterRegistry.lua ==========
 
 -- =============================================================================
@@ -1646,7 +2563,899 @@ task.spawn(function()
 end)
 
 return StatusEffectSystem
-========== ARCHIVO: ./src/ServerScriptService/Systems/SkillManagerService.lua ==========
+========== ARCHIVO: ./src/ServerScriptService/Services/WorldService.lua ==========
+
+-- =============================================================================
+-- WorldService.lua
+-- Ubicación: src/ServerScriptService/Services/WorldService.lua
+-- =============================================================================
+
+local TweenService      = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GameConstants     = require(ReplicatedStorage.GameConstants)
+
+local WorldService = {}
+
+-- =============================================================================
+-- Estado interno
+-- =============================================================================
+
+-- Referencia al mapa instanciado actualmente. Solo existe durante PLAYING/LAST_MAN.
+local _activeMapInstance: Model? = nil
+
+-- Nombre del mapa activo (para buscarlo en Workspace si hace falta).
+local _activeMapName: string? = nil
+
+-- =============================================================================
+-- API Pública — Spawns del Lobby (estático, siempre en Workspace)
+-- =============================================================================
+
+--- Retorna el CFrame del spawn del Lobby.
+--- Ruta real: workspace.Lobby_Prueba_1.LobbySpawn
+function WorldService.getLobbySpawnCFrame(): CFrame
+    local lobby = workspace:FindFirstChild("Lobby_Prueba_1")
+    if not lobby then
+        warn("[WorldService] 'Lobby_Prueba_1' no encontrado en Workspace. Usando fallback.")
+        return CFrame.new(0, 5, 0)
+    end
+
+    local spawnPart = lobby:FindFirstChild("LobbySpawn")
+    if not spawnPart or not spawnPart:IsA("BasePart") then
+        warn("[WorldService] 'LobbySpawn' no encontrado dentro de Lobby_Prueba_1. Usando fallback.")
+        return CFrame.new(0, 5, 0)
+    end
+
+    return spawnPart.CFrame
+end
+
+-- =============================================================================
+-- API Pública — Spawns del Mapa Dinámico
+-- =============================================================================
+
+--- Retorna el CFrame del spawn del Killer en el mapa activo.
+--- Ruta real: workspace.<mapName>.KillerSpawn
+function WorldService.getKillerSpawnCFrame(): CFrame
+    local map = _activeMapInstance
+    if not map or not map.Parent then
+        warn("[WorldService] No hay mapa activo al buscar KillerSpawn.")
+        return CFrame.new(0, 10, 0)
+    end
+
+    local spawnPart = map:FindFirstChild("KillerSpawn")
+    if not spawnPart or not spawnPart:IsA("BasePart") then
+        warn("[WorldService] 'KillerSpawn' no encontrado en el mapa activo. Usando fallback.")
+        return CFrame.new(0, 10, 0)
+    end
+
+    return spawnPart.CFrame
+end
+
+--- Retorna todos los BaseParts de SurvivorSpawns del mapa activo.
+--- Ruta real: workspace.<mapName>.SurvivorSpawns.Spawn1 ... SpawnN
+function WorldService.getSurvivorSpawnParts(): {BasePart}
+    local map = _activeMapInstance
+    if not map or not map.Parent then
+        warn("[WorldService] No hay mapa activo al buscar SurvivorSpawns.")
+        return {}
+    end
+
+    local folder = map:FindFirstChild("SurvivorSpawns")
+    if not folder then
+        warn("[WorldService] 'SurvivorSpawns' no encontrado en el mapa activo.")
+        return {}
+    end
+
+    local result: {BasePart} = {}
+    for _, child in ipairs(folder:GetChildren()) do
+        if child:IsA("BasePart") then
+            table.insert(result, child)
+        end
+    end
+
+    if #result == 0 then
+        warn("[WorldService] SurvivorSpawns no contiene BaseParts.")
+    end
+
+    return result
+end
+
+-- =============================================================================
+-- API Pública — Gestión de Mapas
+-- =============================================================================
+
+--- Clona el mapa desde ReplicatedStorage y lo instancia en Workspace.
+--- Ruta fuente: ReplicatedStorage.Assets.Maps.<mapName>
+function WorldService.loadMap(mapName: string)
+    -- Descargar el mapa anterior si existe
+    WorldService.unloadMap()
+
+    local mapsFolder = ReplicatedStorage:FindFirstChild("Assets")
+        and ReplicatedStorage.Assets:FindFirstChild("Maps")
+
+    if not mapsFolder then
+        warn("[WorldService] Carpeta 'ReplicatedStorage/Assets/Maps' no encontrada.")
+        return
+    end
+
+    local template = mapsFolder:FindFirstChild(mapName)
+    if not template then
+        warn("[WorldService] Mapa '" .. mapName .. "' no encontrado en Assets/Maps.")
+        return
+    end
+
+    _activeMapInstance = template:Clone()
+    _activeMapInstance.Parent = workspace
+    _activeMapName = mapName
+
+    print("🗺️ [WorldService] Mapa cargado: " .. mapName)
+end
+
+--- Destruye el mapa activo y limpia la referencia.
+function WorldService.unloadMap()
+    if _activeMapInstance then
+        _activeMapInstance:Destroy()
+        _activeMapInstance = nil
+        _activeMapName = nil
+        print("🗺️ [WorldService] Mapa descargado.")
+    end
+end
+
+--- Retorna la instancia del mapa activo (puede ser nil si no hay partida).
+function WorldService.getActiveMap(): Model?
+    return _activeMapInstance
+end
+
+-- =============================================================================
+-- API Pública — Iluminación
+-- =============================================================================
+
+local LightingPresets = {
+    Normal = {
+        FogEnd         = GameConstants.VFX.NORMAL_FOG_END,
+        Brightness     = 2,
+        OutdoorAmbient = Color3.fromRGB(70, 70, 70),
+        tint           = Color3.fromRGB(255, 255, 255),
+    },
+    Chase = {
+        FogEnd         = GameConstants.VFX.CHASE_FOG_END,
+        Brightness     = 0.3,
+        OutdoorAmbient = GameConstants.VFX.CHASE_AMBIENT,
+        tint           = Color3.fromRGB(180, 160, 160),
+    },
+    Escape = {
+        FogEnd         = 500,
+        Brightness     = 1.5,
+        OutdoorAmbient = Color3.fromRGB(100, 90, 50),
+        tint           = GameConstants.VFX.ESCAPE_TINT,
+    },
+}
+
+function WorldService.applyLightingPreset(presetName: string, duration: number?)
+    local preset = LightingPresets[presetName]
+    if not preset then
+        warn("[WorldService] Preset desconocido: '" .. presetName .. "'")
+        return
+    end
+
+    local lighting  = game:GetService("Lighting")
+    local tweenInfo = TweenInfo.new(duration or 3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+    TweenService:Create(lighting, tweenInfo, {
+        FogEnd         = preset.FogEnd,
+        Brightness     = preset.Brightness,
+        OutdoorAmbient = preset.OutdoorAmbient,
+    }):Play()
+
+    local cc = lighting:FindFirstChildOfClass("ColorCorrectionEffect")
+    if cc then
+        TweenService:Create(cc, tweenInfo, { TintColor = preset.tint }):Play()
+    end
+end
+
+-- =============================================================================
+-- Arranque
+-- =============================================================================
+
+function WorldService.Start()
+    -- Validar que el Lobby estático existe al arrancar
+    local lobby = workspace:FindFirstChild("Lobby_Prueba_1")
+    if lobby then
+        print("🌍 [WorldService] Lobby_Prueba_1 encontrado. Listo.")
+    else
+        warn("[WorldService] ⚠️ 'Lobby_Prueba_1' no está en Workspace. " ..
+             "Los jugadores usarán posición de emergencia hasta que el artista lo coloque.")
+    end
+end
+
+return WorldService
+========== ARCHIVO: ./src/ServerScriptService/Services/CombatService.lua ==========
+
+
+========== ARCHIVO: ./src/ServerScriptService/Services/MatchManagerService.lua ==========
+
+-- =============================================================================
+-- MatchManagerService.lua
+-- Ubicación: src/ServerScriptService/Services/MatchManagerService.lua
+--
+-- FIX BUG 2 (derivado): El estado WAITING evaluaba MIN_PLAYERS en onEnter()
+-- una sola vez. Si no había jugadores en ese momento, se quedaba bloqueado
+-- porque no había nada que re-evaluara la condición después.
+--
+-- Solución: WAITING escucha PlayerAdded y re-evalúa. Si MIN_PLAYERS = 1
+-- (debug), transiciona inmediatamente. Si MIN_PLAYERS = 2, espera al evento.
+--
+-- Principio: la FSM no bloquea hilos esperando condiciones externas.
+-- Reacciona a eventos cuando las condiciones cambian.
+-- =============================================================================
+
+local Players             = game:GetService("Players")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local GameState      = require(ReplicatedStorage.Enums.GameState)
+local GameConstants  = require(ReplicatedStorage.GameConstants)
+local ServerEventBus = require(ServerScriptService.Network.ServerEventBus)
+local TimeManagerService = require(script.Parent.TimeManagerService)
+local RemoteRegistry = require(ReplicatedStorage.Network.RemoteRegistry)
+
+local MatchManagerService = {}
+MatchManagerService._state = GameState.WAITING
+
+-- Conexión a PlayerAdded que se desconecta una vez que se cumple la condición.
+-- La guardamos para poder desconectarla en onExit del estado WAITING.
+local _waitingForPlayersConn = nil
+
+-- ---------------------------------------------------------------------------
+-- 🧠 FSM: Definición de estados
+-- ---------------------------------------------------------------------------
+local States = {
+
+    -- -----------------------------------------------------------------------
+    [GameState.WAITING] = {
+        onEnter = function()
+            print("🛑 [MATCH] WAITING: Esperando jugadores...")
+
+            local function tryTransitionToLobby()
+                if #Players:GetPlayers() >= GameConstants.Match.MIN_PLAYERS then
+                    MatchManagerService.transition(GameState.LOBBY)
+                end
+            end
+
+            -- FIX: conectar al evento de jugadores ANTES de evaluar,
+            -- para no perder el evento si el jugador ya está en el servidor.
+            _waitingForPlayersConn = Players.PlayerAdded:Connect(tryTransitionToLobby)
+
+            -- Evaluar inmediatamente (cubre el caso debug con MIN_PLAYERS = 1
+            -- donde el jugador ya está en el servidor cuando la FSM arranca).
+            tryTransitionToLobby()
+        end,
+
+        onExit = function()
+            -- Limpiar la conexión para no acumular listeners entre partidas
+            if _waitingForPlayersConn then
+                _waitingForPlayersConn:Disconnect()
+                _waitingForPlayersConn = nil
+            end
+        end,
+
+        validTransitions = { GameState.LOBBY },
+    },
+
+    -- -----------------------------------------------------------------------
+    [GameState.LOBBY] = {
+        onEnter = function()
+            print(string.format(
+                "🟢 [MATCH] LOBBY: Cuenta regresiva de %ds...",
+                GameConstants.Match.LOBBY_COUNTDOWN
+            ))
+
+            TimeManagerService.start(
+                GameConstants.Match.LOBBY_COUNTDOWN,
+                nil,
+                function()
+                    MatchManagerService.transition(GameState.SELECTING)
+                end
+            )
+        end,
+
+        onExit = function()
+            TimeManagerService.cancel()
+        end,
+
+        validTransitions = { GameState.SELECTING, GameState.WAITING },
+    },
+
+    -- -----------------------------------------------------------------------
+   [GameState.SELECTING] = {
+        onEnter = function()
+            print("⚡ [MATCH] SELECTING: Spawneando jugadores...")
+            
+            -- ¡NUEVO!: Clonamos el mapa ANTES de que el RespawnManager intente meter a la gente
+            local WorldService = require(script.Parent.WorldService)
+            WorldService.loadMap("Mapa_Prueba_1")
+            
+            -- Esta fase solo abre una ventana de tiempo de 5 segundos
+            task.delay(5, function()
+                if MatchManagerService._state == GameState.SELECTING then
+                    MatchManagerService.transition(GameState.PLAYING)
+                end
+            end)
+        end,
+        validTransitions = { GameState.PLAYING, GameState.ENDING },
+    },
+
+    -- -----------------------------------------------------------------------
+    [GameState.PLAYING] = {
+        onEnter = function()
+            local matchDuration = GameConstants.Match.BASE_TIME_PER_PLAYER
+                * math.max(#Players:GetPlayers(), 1)
+
+            print(string.format("⚔️ [MATCH] PLAYING: Partida iniciada. Duración: %ds", matchDuration))
+
+            TimeManagerService.start(matchDuration, nil, function()
+                print("⏰ [MATCH] Tiempo agotado.")
+                MatchManagerService.transition(GameState.ENDING)
+            end)
+        end,
+
+        onExit = function()
+            TimeManagerService.cancel()
+        end,
+
+        validTransitions = { GameState.LAST_MAN, GameState.ENDING },
+    },
+
+    -- -----------------------------------------------------------------------
+    [GameState.LAST_MAN] = {
+        onEnter = function()
+            print("🔥 [MATCH] LAST MAN STANDING")
+            -- AudioService y el LMS timer se manejan via ServerEventBus listeners
+        end,
+
+        validTransitions = { GameState.ENDING },
+    },
+
+    -- -----------------------------------------------------------------------
+   [GameState.ENDING] = {
+        onEnter = function()
+            print("🏁 [MATCH] ENDING: Mostrando resultados...")
+            TimeManagerService.cancel()
+            
+            -- ¡NUEVO!: Borramos el mapa para volver a tener solo el Lobby
+            local WorldService = require(script.Parent.WorldService)
+            WorldService.unloadMap()
+
+            task.delay(GameConstants.Match.INTERMISSION_TIME, function()
+                if MatchManagerService._state == GameState.ENDING then
+                    MatchManagerService.transition(GameState.WAITING)
+                end
+            end)
+        end,
+        validTransitions = { GameState.WAITING },
+    },
+}
+
+-- ---------------------------------------------------------------------------
+-- ⚙️ Motor de transiciones (única función que cambia _state)
+-- ---------------------------------------------------------------------------
+function MatchManagerService.transition(newState: string)
+    local currentStateDef = States[MatchManagerService._state]
+
+    if not currentStateDef then
+        warn("[MATCH] Estado actual sin definición: " .. tostring(MatchManagerService._state))
+        return
+    end
+
+    -- Validar que la transición sea legal según la FSM
+    if not table.find(currentStateDef.validTransitions, newState) then
+        warn(string.format(
+            "❌ [MATCH] Transición ilegal: %s → %s",
+            tostring(MatchManagerService._state),
+            tostring(newState)
+        ))
+        return
+    end
+
+    local oldState = MatchManagerService._state
+
+    -- 1. Salir del estado actual
+    if currentStateDef.onExit then
+        currentStateDef.onExit()
+    end
+
+    -- 2. Cambiar estado
+    MatchManagerService._state = newState
+    print(string.format("🔄 [MATCH] %s → %s", oldState, newState))
+
+    -- 3. Entrar al nuevo estado
+    local nextStateDef = States[newState]
+    if nextStateDef and nextStateDef.onEnter then
+        nextStateDef.onEnter()
+    end
+
+    -- 4. Notificar al servidor (bus interno)
+    ServerEventBus.MatchStateChanged:Fire(newState, oldState)
+
+    -- 5. Notificar a los clientes (red)
+    RemoteRegistry.UpdateGameState:FireAllClients(newState)
+end
+
+-- ---------------------------------------------------------------------------
+-- Reacciones a eventos del juego
+-- ---------------------------------------------------------------------------
+local function setupEventListeners()
+    -- Cuando todos los survivors mueren → fin de partida
+    ServerEventBus.SurvivorKilled:Connect(function()
+        if MatchManagerService._state ~= GameState.PLAYING
+            and MatchManagerService._state ~= GameState.LAST_MAN then
+            return
+        end
+
+        -- Contar survivors vivos
+        local aliveCount = 0
+        for _, p in ipairs(Players:GetPlayers()) do
+            local char = p.Character
+            if char and char:FindFirstChild("SurvivorID") then
+                local hum = char:FindFirstChild("Humanoid")
+                if hum and hum.Health > 0 then
+                    aliveCount += 1
+                end
+            end
+        end
+
+        if aliveCount == 0 then
+            MatchManagerService.transition(GameState.ENDING)
+        elseif aliveCount == 1 and MatchManagerService._state == GameState.PLAYING then
+            MatchManagerService.transition(GameState.LAST_MAN)
+        end
+    end)
+
+    -- Cuando el killer muere (solo MIGUEL) → survivors ganan
+    ServerEventBus.KillerKilled:Connect(function()
+        if MatchManagerService._state == GameState.PLAYING
+            or MatchManagerService._state == GameState.LAST_MAN then
+            MatchManagerService.transition(GameState.ENDING)
+        end
+    end)
+
+    -- Cuando la música LMS termina → fin del overtime
+    ServerEventBus.LMSMusicEnded:Connect(function()
+        if MatchManagerService._state == GameState.LAST_MAN then
+            MatchManagerService.transition(GameState.ENDING)
+        end
+    end)
+
+    -- Si el killer se desconecta durante la partida → survivors ganan
+    Players.PlayerRemoving:Connect(function(player)
+        if MatchManagerService._state ~= GameState.PLAYING
+            and MatchManagerService._state ~= GameState.LAST_MAN then
+            return
+        end
+
+        local char = player.Character
+        if char and char:FindFirstChild("KillerID") then
+            print("[MATCH] El killer abandonó. Los supervivientes ganan.")
+            MatchManagerService.transition(GameState.ENDING)
+        end
+    end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Arranque
+-- ---------------------------------------------------------------------------
+function MatchManagerService.Start()
+    print("🎮 [MatchManager] FSM iniciada.")
+
+    setupEventListeners()
+
+    -- Disparar onEnter del estado inicial manualmente
+    local initialDef = States[MatchManagerService._state]
+    if initialDef and initialDef.onEnter then
+        initialDef.onEnter()
+    end
+end
+
+return MatchManagerService
+========== ARCHIVO: ./src/ServerScriptService/Services/RespawnManagerService.lua ==========
+
+-- =============================================================================
+-- RespawnManagerService.lua
+-- Ubicación: src/ServerScriptService/Services/RespawnManagerService.lua
+-- =============================================================================
+
+local Players             = game:GetService("Players")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local ServerEventBus = require(ServerScriptService.Network.ServerEventBus)
+local RemoteRegistry = require(ReplicatedStorage.Network.RemoteRegistry)
+local GameState      = require(ReplicatedStorage.Enums.GameState)
+local WorldService   = require(script.Parent.WorldService)
+
+local RespawnManagerService = {}
+
+-- =============================================================================
+-- Estado interno
+-- =============================================================================
+
+-- Selección de personaje de cada jugador: { [Player] = { role, id } }
+local _playerSelections: {[Player]: {role: string, id: string}} = {}
+
+-- Estado de partida actual (actualizado vía bus, sin import circular)
+local _currentMatchState: string = GameState.WAITING
+
+-- Índices de SurvivorSpawns ya usados en esta ronda
+local _usedSpawnIndices: {[number]: boolean} = {}
+
+-- =============================================================================
+-- Helpers: Spawns
+-- =============================================================================
+
+--- Devuelve un CFrame de Survivor único por ronda, rotando cuando se agotan.
+local function getNextSurvivorSpawnCFrame(): CFrame
+    local parts = WorldService.getSurvivorSpawnParts()
+
+    if #parts == 0 then
+        -- Fallback de emergencia distribuido
+        return CFrame.new(
+            math.random(-8, 8),
+            10,
+            math.random(-8, 8)
+        )
+    end
+
+    -- Construir lista de índices disponibles
+    local available: {number} = {}
+    for i = 1, #parts do
+        if not _usedSpawnIndices[i] then
+            table.insert(available, i)
+        end
+    end
+
+    -- Si todos usados, resetear (más jugadores que spawns)
+    if #available == 0 then
+        table.clear(_usedSpawnIndices)
+        for i = 1, #parts do
+            table.insert(available, i)
+        end
+    end
+
+    local pick = available[math.random(1, #available)]
+    _usedSpawnIndices[pick] = true
+
+    -- Offset leve para que no se solapen exactamente
+    local spread = 2
+    return parts[pick].CFrame
+        + Vector3.new(math.random(-spread, spread), 0, math.random(-spread, spread))
+end
+
+-- =============================================================================
+-- Helpers: Inyección de Animator
+--
+-- La estrategia correcta para rigs custom es:
+--   1. Asegurarnos de que el Model tiene un Humanoid.
+--   2. Insertar un Animator dentro del Humanoid (si no existe).
+--   3. NO intentar clonar el LocalScript "Animate" desde el servidor.
+--      En su lugar, el cliente (CharacterAnimationController) lo maneja
+--      vía SetupCharacter RemoteEvent, usando AnimationIds de GameConstants.
+-- =============================================================================
+
+--- Garantiza que el personaje tenga el componente Animator que necesita el cliente.
+local function ensureAnimator(character: Model)
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        warn("[RespawnManager] El modelo no tiene Humanoid: " .. character.Name)
+        return
+    end
+
+    -- Animator es el componente que expone :LoadAnimation() al cliente.
+    -- Sin él, las animaciones no pueden reproducirse.
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then
+        local a = Instance.new("Animator")
+        a.Parent = humanoid
+    end
+end
+
+-- =============================================================================
+-- Core: spawn de un jugador
+-- =============================================================================
+
+local function spawnPlayer(player: Player, role: string, characterId: string)
+    local folderName  = (role == "Killer") and "Killers" or "Survivors"
+    local assetsRoot  = ReplicatedStorage:FindFirstChild("Assets")
+
+    if not assetsRoot then
+        warn("[RespawnManager] 'Assets' no encontrado en ReplicatedStorage.")
+        return
+    end
+
+    local categoryFolder = assetsRoot:FindFirstChild("Characters")
+        and assetsRoot.Characters:FindFirstChild(folderName)
+
+    local characterModel = categoryFolder and categoryFolder:FindFirstChild(characterId)
+
+    if not characterModel then
+        warn(string.format(
+            "[RespawnManager] Modelo '%s' no encontrado en Assets/Characters/%s.",
+            characterId, folderName
+        ))
+        return
+    end
+
+    -- Destruir personaje anterior limpiamente
+    if player.Character then
+        player.Character:Destroy()
+    end
+
+    -- Clonar modelo
+    local clone = characterModel:Clone()
+    clone.Name  = player.Name
+
+    -- Tags de identidad para DamageSystem y SkillManagerService
+    local idTag  = Instance.new("StringValue")
+    idTag.Name   = (role == "Killer") and "KillerID" or "SurvivorID"
+    idTag.Value  = characterId
+    idTag.Parent = clone
+
+    -- ✅ Inyectar Animator antes de entrar al Workspace
+    -- El cliente leerá este componente para cargar las animaciones.
+    ensureAnimator(clone)
+
+    -- Determinar posición de spawn
+    local spawnCF: CFrame
+    if role == "Killer" then
+        spawnCF = WorldService.getKillerSpawnCFrame()
+    else
+        spawnCF = getNextSurvivorSpawnCFrame()
+    end
+
+    -- Llevar al Workspace y posicionar ANTES de asignar a player.Character
+    -- para evitar que el cliente vea al personaje caer desde 0,0,0
+    clone.Parent = workspace
+    clone:PivotTo(spawnCF)
+
+    -- Asignar Character (esto dispara CharacterAdded en el cliente)
+    player.Character = clone
+
+    -- ✅ Avisar al cliente que reconfigure cámara y arranque animaciones.
+    -- El delay de 0.15s da tiempo a la replicación para que player.Character
+    -- ya esté disponible en el cliente cuando llega el evento.
+    task.delay(0.15, function()
+        if player and player.Parent then
+            RemoteRegistry.SetupCharacter:FireClient(player)
+        end
+    end)
+
+    -- Wiring de muerte
+    local hum = clone:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.Died:Once(function()
+            if role == "Survivor" then
+                local victim = Players:GetPlayerFromCharacter(clone)
+                if victim then
+                    ServerEventBus.SurvivorKilled:Fire(victim, nil)
+                end
+            elseif role == "Killer" then
+                ServerEventBus.KillerKilled:Fire(player)
+            end
+            RemoteRegistry.ShowRespawnMenu:FireClient(player, 30)
+        end)
+    end
+
+    print(string.format(
+        "✅ [RespawnManager] %s → %s (%s) en %s",
+        player.Name, characterId, role,
+        string.format("(%.1f, %.1f, %.1f)", spawnCF.X, spawnCF.Y, spawnCF.Z)
+    ))
+end
+
+local function spawnAllPlayers()
+    table.clear(_usedSpawnIndices)
+    for _, player in ipairs(Players:GetPlayers()) do
+        local sel = _playerSelections[player]
+            or { role = "Survivor", id = "GONZACARBON" }
+        spawnPlayer(player, sel.role, sel.id)
+    end
+end
+
+--- Regresa a todos los jugadores al Lobby usando LoadCharacter() + teletransporte.
+local function returnAllToLobby()
+    local lobbyCF = WorldService.getLobbySpawnCFrame()
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        -- Destruir el personaje custom si existe
+        if player.Character then
+            player.Character:Destroy()
+        end
+
+        -- LoadCharacter() da al jugador su avatar de Roblox para el Lobby.
+        -- CharacterAdded se dispara, y cuando el personaje está listo
+        -- lo teletransportamos al LobbySpawn.
+        player:LoadCharacter()
+
+        -- Esperamos a que el personaje de Lobby esté en el Workspace
+        -- antes de moverlo, para evitar que aparezca en 0,0,0.
+        task.spawn(function()
+            local char = player.Character or player.CharacterAdded:Wait()
+            -- WaitForChild con timeout por si el Humanoid tarda en replicarse
+            local root = char:WaitForChild("HumanoidRootPart", 5)
+            if root then
+                char:PivotTo(lobbyCF + Vector3.new(
+                    math.random(-3, 3), 0, math.random(-3, 3)
+                ))
+            end
+        end)
+    end
+end
+
+-- =============================================================================
+-- API pública
+-- =============================================================================
+
+function RespawnManagerService.spawnPlayer(player: Player, role: string, characterId: string)
+    spawnPlayer(player, role, characterId)
+end
+
+-- =============================================================================
+-- Start
+-- =============================================================================
+
+function RespawnManagerService.Start()
+    print("👼 [RespawnManager] Iniciado.")
+
+    -- Roblox no debe respawnear automáticamente — nosotros lo controlamos
+    Players.CharacterAutoLoads = false
+
+    -- Dar personaje de Lobby a los jugadores que entren al servidor
+    Players.PlayerAdded:Connect(function(player)
+        player:LoadCharacter()
+
+        -- Teletransportar al LobbySpawn cuando el personaje esté listo
+        task.spawn(function()
+            local char = player.Character or player.CharacterAdded:Wait()
+            local root = char:WaitForChild("HumanoidRootPart", 5)
+            if root then
+                local lobbyCF = WorldService.getLobbySpawnCFrame()
+                char:PivotTo(lobbyCF + Vector3.new(
+                    math.random(-3, 3), 0, math.random(-3, 3)
+                ))
+            end
+        end)
+    end)
+
+    -- Limpiar selección cuando un jugador se va
+    Players.PlayerRemoving:Connect(function(player)
+        _playerSelections[player] = nil
+    end)
+
+    -- Guardar selección de personaje enviada por el cliente
+    RemoteRegistry.SelectCharacter.OnServerEvent:Connect(function(player, role, characterId)
+        if type(role) ~= "string" or type(characterId) ~= "string" then
+            warn("[RespawnManager] SelectCharacter: datos inválidos de " .. player.Name)
+            return
+        end
+        _playerSelections[player] = { role = role, id = characterId }
+        print(string.format(
+            "📥 [RespawnManager] %s eligió: %s (%s)",
+            player.Name, characterId, role
+        ))
+    end)
+
+    -- El jugador pide revivir desde el menú de muerte
+    RemoteRegistry.RequestRespawn.OnServerEvent:Connect(function(player)
+        if _currentMatchState ~= GameState.PLAYING
+            and _currentMatchState ~= GameState.LAST_MAN then
+            return
+        end
+        local sel = _playerSelections[player]
+        if sel then
+            spawnPlayer(player, sel.role, sel.id)
+        end
+    end)
+
+    -- Reaccionar a cambios de fase del MatchManager (vía bus, sin import circular)
+    ServerEventBus.MatchStateChanged:Connect(function(newState: string)
+        _currentMatchState = newState
+
+        if newState == GameState.PLAYING then
+            spawnAllPlayers()
+        elseif newState == GameState.ENDING then
+            returnAllToLobby()
+        elseif newState == GameState.WAITING then
+            table.clear(_playerSelections)
+            table.clear(_usedSpawnIndices)
+        end
+    end)
+end
+
+return RespawnManagerService
+========== ARCHIVO: ./src/ServerScriptService/Services/TimeManagerService.lua ==========
+
+-- src/ServerScriptService/Services/TimeManagerService.lua
+
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local ServerEventBus = require(ServerScriptService.Network.ServerEventBus)
+local RemoteRegistry = require(ReplicatedStorage.Network.RemoteRegistry)
+
+local TimeManagerService = {}
+
+local _timerThread: thread?  = nil
+local _remaining:   number   = 0
+local _isRunning:   boolean  = false
+
+function TimeManagerService.start(
+	seconds:   number,
+	onTick:    ((number) -> ())?,
+	onExpired: (() -> ())?
+)
+	TimeManagerService.cancel()
+
+	_remaining = seconds
+	_isRunning = true
+
+	_timerThread = task.spawn(function()
+		while _remaining > 0 do
+			task.wait(1)
+
+			if not _isRunning then return end
+
+			_remaining -= 1
+
+			if onTick then
+				onTick(_remaining)
+			end
+
+			-- Notificar al bus interno del servidor
+			ServerEventBus.TimeUpdated:Fire(_remaining)
+
+			-- ✅ Notificar a todos los clientes para el HUD
+			RemoteRegistry.TimeUpdated:FireAllClients(_remaining)
+		end
+
+		_isRunning   = false
+		_timerThread = nil
+
+		if onExpired then
+			onExpired()
+		end
+
+		ServerEventBus.TimeExpired:Fire()
+	end)
+end
+
+function TimeManagerService.addTime(seconds: number)
+	if _isRunning then
+		_remaining += seconds
+		print(string.format("[TimeManager] +%ds añadidos. Nuevo total: %ds", seconds, _remaining))
+	end
+end
+
+function TimeManagerService.cancel()
+	if _timerThread then
+		_isRunning   = false
+		task.cancel(_timerThread)
+		_timerThread = nil
+		_remaining   = 0
+	end
+end
+
+function TimeManagerService.getRemaining(): number
+	return _remaining
+end
+
+function TimeManagerService.isRunning(): boolean
+	return _isRunning
+end
+
+function TimeManagerService.Start()
+	print("⏳ [TimeManager] Iniciado.")
+end
+
+return TimeManagerService
+========== ARCHIVO: ./src/ServerScriptService/Services/SkillManagerService.lua ==========
 
 -- =============================================================================
 -- SkillManagerService.lua
@@ -1932,54 +3741,6 @@ function SkillManagerService.Start()
 end
 
 return SkillManagerService
-========== ARCHIVO: ./src/ServerScriptService/Services/CombatService.lua ==========
-
-
-========== ARCHIVO: ./src/ServerScriptService/Services/MatchManagerService.lua ==========
-
--- src/ServerScriptService/Services/MatchManagerService.lua
-local ServerScriptService = game:GetService("ServerScriptService")
-local ServerEventBus = require(ServerScriptService.Network.ServerEventBus)
-
-local MatchManagerService = {}
-
-function MatchManagerService.Start()
-    print("🎮 [MatchManager] Iniciado. Empezando a enviar pings...")
-    
-    -- Creamos un hilo paralelo para no bloquear el juego
-    task.spawn(function()
-        local contador = 1
-        while true do
-            task.wait(2) -- Espera 2 segundos
-            -- Disparamos el evento pasando argumentos
-            ServerEventBus.TestPing:Fire("Hola desde MatchManager", contador)
-            contador += 1
-        end
-    end)
-end
-
-return MatchManagerService
-========== ARCHIVO: ./src/ServerScriptService/Services/TimeManagerService.lua ==========
-
--- src/ServerScriptService/Services/TimeManagerService.lua
-local ServerScriptService = game:GetService("ServerScriptService")
-local ServerEventBus = require(ServerScriptService.Network.ServerEventBus)
-
-local TimeManagerService = {}
-
-function TimeManagerService.Start()
-    print("⏳ [TimeManager] Iniciado. Esperando pings...")
-    
-    -- Nos conectamos al evento
-    ServerEventBus.TestPing:Connect(function(mensaje, contador)
-        print("🏓 [TimeManager] ¡Pong! Recibí el mensaje: '" .. mensaje .. "' | Número: " .. contador)
-    end)
-end
-
-return TimeManagerService
-========== ARCHIVO: ./src/ServerScriptService/Services/SkillManagerService.lua ==========
-
-
 ========== ARCHIVO: ./src/ServerScriptService/Network/ServerEventBus.lua ==========
 
 -- =============================================================================
@@ -2091,19 +3852,52 @@ local ServerEventBus = {
 return ServerEventBus
 ========== ARCHIVO: ./src/ServerScriptService/ServerMain.server.lua ==========
 
--- src/ServerScriptService/ServerMain.server.lua
+-- =============================================================================
+-- ServerMain.server.lua
+-- Ubicación: src/ServerScriptService/ServerMain.server.lua
+--
+-- Punto de entrada del servidor. Inicia todos los servicios en el orden
+-- correcto según su grafo de dependencias.
+--
+-- Orden de arranque (de menor a mayor dependencia):
+--   1. TimeManagerService    → solo depende de ServerEventBus
+--   2. WorldService          → solo depende de GameConstants
+--   3. RespawnManagerService → depende de ServerEventBus, WorldService, RemoteRegistry
+--   4. SkillManagerService   → depende de DamageSystem, StatusEffectSystem, CharacterRegistry
+--   5. MatchManagerService   → depende de todos los anteriores (vía bus)
+--                              SE INICIA AL FINAL porque dispara el primer
+--                              MatchStateChanged que los otros servicios deben
+--                              estar listos para escuchar.
+--
+-- Regla: ningún servicio hace require() de otro servicio en top-level.
+-- La comunicación entre servicios pasa por ServerEventBus.
+-- =============================================================================
+
 local Services = script.Parent.Services
 
-local TimeManagerService = require(Services.TimeManagerService)
-local MatchManagerService = require(Services.MatchManagerService)
+local TimeManagerService    = require(Services.TimeManagerService)
+local WorldService          = require(Services.WorldService)
+local RespawnManagerService = require(Services.RespawnManagerService)
+local SkillManagerService   = require(Services.SkillManagerService)
+local MatchManagerService   = require(Services.MatchManagerService)
 
-print("🚀 Arrancando Servidor de Simio Chase v0.1...")
+print("🚀 Arrancando Servidor de Simio Chase...")
 
--- Iniciamos los servicios (el orden importa si uno depende del otro)
+-- 1. Servicios sin dependencias entre sí — orden no importa aquí
 TimeManagerService.Start()
+WorldService.Start()
+
+-- 2. Servicios que escuchan el bus — deben estar listos ANTES de que
+--    MatchManagerService dispare su primer evento.
+RespawnManagerService.Start()
+SkillManagerService.Start()
+
+-- 3. MatchManagerService AL FINAL — su Start() dispara onEnter(WAITING)
+--    que a su vez puede disparar MatchStateChanged si hay suficientes jugadores.
+--    En ese momento, RespawnManagerService ya está suscrito y listo.
 MatchManagerService.Start()
 
-print("✅ Servidor inicializado con éxito.")
+print("✅ Servidor inicializado. Simio Chase en espera de jugadores.")
 ========== ARCHIVO: ./default.project.json ==========
 
 {
@@ -2111,15 +3905,18 @@ print("✅ Servidor inicializado con éxito.")
     "tree": {
         "$className": "DataModel",
         "ServerScriptService": {
-            "$path": "src/ServerScriptService"
+            "$path": "src/ServerScriptService",
+            "$ignoreUnknownInstances": true
         },
         "StarterPlayer": {
             "StarterPlayerScripts": {
-                "$path": "src/StarterPlayer/StarterPlayerScripts"
+                "$path": "src/StarterPlayer/StarterPlayerScripts",
+                "$ignoreUnknownInstances": true
             }
         },
         "ReplicatedStorage": {
-            "$path": "src/ReplicatedStorage"
+            "$path": "src/ReplicatedStorage",
+            "$ignoreUnknownInstances": true
         }
     }
 }

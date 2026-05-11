@@ -78,6 +78,12 @@ local RemoteRegistry = {
 	--- Client → Server: El jugador pide revivir.
 	RequestRespawn = getOrCreateRemote(eventsFolder, "RequestRespawn"),
 
+	--- Server → Client: Notificar al cliente que su Character cambió y debe reasignar cámara.
+	SetupCharacter = getOrCreateRemote(eventsFolder, "SetupCharacter"),
+	
+	--- Server → Client: Tick de tiempo cada segundo. Args: (remaining: number)
+	TimeUpdated = getOrCreateRemote(eventsFolder, "TimeUpdated"),
+
 	-- =========================================================================
 	-- ⚔️ COMBATE (Client → Server y Server → Client)
 	-- =========================================================================
