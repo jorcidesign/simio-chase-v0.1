@@ -1,158 +1,100 @@
 -- =============================================================================
 -- RemoteRegistry.lua
--- Ubicación: src/shared/network/RemoteRegistry.lua
+-- Ubicación: src/ReplicatedStorage/Network/RemoteRegistry.lua
 --
--- Registro centralizado de TODOS los RemoteEvents y RemoteFunctions del juego.
--- Crea los remotes si no existen, y los retorna listos para usar.
---
--- Principio SOLID: Single Responsibility
--- Elimina la proliferación de getOrCreateEvent() por todo el código.
--- Un solo lugar para ver TODOS los canales de comunicación cliente-servidor.
+-- SPRINT 2 — Adiciones:
+--   + OvertimeStarted  : Server → Client. Avisa que el overtime/escape comenzó.
+--   + EscapeTimerTick  : Server → Client. Timer de los 20s de escape.
+--   + EscapeSuccess    : Server → Client. Avisamos a un survivor que escapó.
 -- =============================================================================
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- ---------------------------------------------------------------------------
--- Helpers privados
--- ---------------------------------------------------------------------------
-
 local function getFolder(name: string): Folder
-	local f = ReplicatedStorage:FindFirstChild(name)
-	if not f then
-		f = Instance.new("Folder")
-		f.Name = name
-		f.Parent = ReplicatedStorage
-	end
-	return f
+    local f = ReplicatedStorage:FindFirstChild(name)
+    if not f then
+        f = Instance.new("Folder")
+        f.Name = name
+        f.Parent = ReplicatedStorage
+    end
+    return f
 end
 
 local function getOrCreateRemote(parent: Instance, name: string): RemoteEvent
-	local ev = parent:FindFirstChild(name)
-	if not ev then
-		ev = Instance.new("RemoteEvent")
-		ev.Name = name
-		ev.Parent = parent
-	end
-	return ev
+    local ev = parent:FindFirstChild(name)
+    if not ev then
+        ev = Instance.new("RemoteEvent")
+        ev.Name = name
+        ev.Parent = parent
+    end
+    return ev
 end
 
 local function getOrCreateBindable(name: string): BindableEvent
-	local ev = ReplicatedStorage:FindFirstChild(name)
-	if not ev then
-		ev = Instance.new("BindableEvent")
-		ev.Name = name
-		ev.Parent = ReplicatedStorage
-	end
-	return ev
+    local ev = ReplicatedStorage:FindFirstChild(name)
+    if not ev then
+        ev = Instance.new("BindableEvent")
+        ev.Name = name
+        ev.Parent = ReplicatedStorage
+    end
+    return ev
 end
-
--- ---------------------------------------------------------------------------
--- Construcción del registro
--- ---------------------------------------------------------------------------
 
 local eventsFolder = getFolder("GameEvents")
 
---- @class RemoteRegistry
---- Todos los canales de comunicación tipados.
 local RemoteRegistry = {
+    -- Estado del juego
+    UpdateGameState  = getOrCreateRemote(eventsFolder, "UpdateGameState"),
+    AssignRole       = getOrCreateRemote(eventsFolder, "AssignRole"),
+    ExitOpen         = getOrCreateRemote(eventsFolder, "ExitOpen"),
+    LMSStart         = getOrCreateRemote(eventsFolder, "LMSStart"),
+    ShowRespawnMenu  = getOrCreateRemote(eventsFolder, "ShowRespawnMenu"),
+    RequestRespawn   = getOrCreateRemote(eventsFolder, "RequestRespawn"),
+    SetupCharacter   = getOrCreateRemote(eventsFolder, "SetupCharacter"),
+    TimeUpdated      = getOrCreateRemote(eventsFolder, "TimeUpdated"),
 
-	-- =========================================================================
-	-- 🎮 ESTADO DEL JUEGO (Server → Client)
-	-- =========================================================================
+    -- SPRINT 2: Overtime / Escape
+    -- Server → Client: Avisa que el overtime comenzó. Args: ninguno.
+    OvertimeStarted  = getOrCreateRemote(eventsFolder, "OvertimeStarted"),
+    -- Server → Client: Tick del timer de escape. Args: (remaining: number).
+    EscapeTimerTick  = getOrCreateRemote(eventsFolder, "EscapeTimerTick"),
+    -- Server → Client: Avisamos a un survivor que escapó con éxito.
+    EscapeSuccess    = getOrCreateRemote(eventsFolder, "EscapeSuccess"),
 
-	--- Enviado cada segundo. Args: (state: string, timer: number, message: string)
-	UpdateGameState = getOrCreateRemote(eventsFolder, "UpdateGameState"),
+    -- Combate
+    M1Attack            = getOrCreateRemote(eventsFolder, "M1Attack"),
+    UseKillerAbility    = getOrCreateRemote(eventsFolder, "UseAbility"),
+    UseSurvivorAbility  = getOrCreateRemote(eventsFolder, "UseSurvivorAbility"),
+    DamageEffect        = getOrCreateRemote(eventsFolder, "DamageEffect"),
+    StunEffect          = getOrCreateRemote(eventsFolder, "StunEffect"),
+    BlindKiller         = getOrCreateRemote(eventsFolder, "eventBlindKiller"),
+    MudScreen           = getOrCreateRemote(eventsFolder, "MudScreen"),
+    PopupHack           = getOrCreateRemote(eventsFolder, "PopupHack"),
+    ActivateDoubleJump  = getOrCreateRemote(eventsFolder, "ActivateDoubleJump"),
+    RageUpdated         = getOrCreateRemote(eventsFolder, "RageUpdated"),
+    SetSprintState      = getOrCreateRemote(eventsFolder, "SetSprintState"),
+    SkillAnimStop       = getOrCreateRemote(eventsFolder, "SkillAnimStop"),
+    SkillCastConfirmed  = getOrCreateRemote(eventsFolder, "SkillCastConfirmed"),
 
-	--- Enviado al inicio. Args: (role: "Survivor"|"Killer", characterId: string)
-	AssignRole = getOrCreateRemote(eventsFolder, "AssignRole"),
+    -- Escape
+    PlayerEscaped = getOrCreateRemote(eventsFolder, "PlayerEscaped"),
+    KillExecution = getOrCreateRemote(eventsFolder, "KillExecution"),
 
-	--- Avisar a todos que la salida está abierta.
-	ExitOpen = getOrCreateRemote(eventsFolder, "ExitOpen"),
+    -- Selección
+    SelectCharacter     = getOrCreateRemote(eventsFolder, "SelectCharacter"),
+    StartSelectionPhase = getOrCreateRemote(eventsFolder, "StartSelectionPhase"),
+    SyncSelectionList   = getOrCreateRemote(eventsFolder, "SyncSelectionList"),
+    LoadSelection       = getOrCreateRemote(eventsFolder, "LoadSelection"),
+    ShowMatchIntro      = getOrCreateRemote(eventsFolder, "ShowMatchIntro"),
 
-	--- Avisar inicio de LMS. Args: (killerId: string, survivorId: string)
-	LMSStart = getOrCreateRemote(eventsFolder, "LMSStart"),
+    -- Stats
+    DisplayStats = getOrCreateRemote(eventsFolder, "DisplayStats"),
 
-	--- Server → Client: Mostrar menú de respawn. Args: (timeLimit: number)
-	ShowRespawnMenu = getOrCreateRemote(eventsFolder, "ShowRespawnMenu"),
-
-	--- Client → Server: El jugador pide revivir.
-	RequestRespawn = getOrCreateRemote(eventsFolder, "RequestRespawn"),
-
-	--- Server → Client: Notificar al cliente que su Character cambió y debe reasignar cámara.
-	SetupCharacter = getOrCreateRemote(eventsFolder, "SetupCharacter"),
-	
-	--- Server → Client: Tick de tiempo cada segundo. Args: (remaining: number)
-	TimeUpdated = getOrCreateRemote(eventsFolder, "TimeUpdated"),
-
-	-- =========================================================================
-	-- ⚔️ COMBATE (Client → Server y Server → Client)
-	-- =========================================================================
-
-	--- Client → Server: El killer intenta un M1.
-	M1Attack = getOrCreateRemote(eventsFolder, "M1Attack"),
-
-	--- Client → Server: Usar habilidad de killer. Args: (abilityServerName: string, target: Vector3?)
-	UseKillerAbility = getOrCreateRemote(eventsFolder, "UseAbility"),
-
-	--- Client → Server: Usar habilidad de survivor. Args: (abilityServerName: string, targetPos: Vector3?)
-	UseSurvivorAbility = getOrCreateRemote(eventsFolder, "UseSurvivorAbility"),
-
-	--- Server → Client: Confirmar daño recibido (flash de pantalla roja).
-	DamageEffect = getOrCreateRemote(eventsFolder, "DamageEffect"),
-
-	--- Server → Client: Aplicar efecto de stun en UI. Args: (duration: number)
-	StunEffect = getOrCreateRemote(eventsFolder, "StunEffect"),
-
-	--- Server → Client: Cegar al killer. Args: (duration: number)
-	BlindKiller = getOrCreateRemote(eventsFolder, "eventBlindKiller"),
-
-	--- Server → Client: Pantalla de barro para Augusto. Args: (duration: number)
-	MudScreen = getOrCreateRemote(eventsFolder, "MudScreen"),
-
-	--- Server → Client: Popup hack de Dante. Args: (duration: number, intensity: number)
-	PopupHack = getOrCreateRemote(eventsFolder, "PopupHack"),
-
-	--- Server → Client: Activar doble salto en el cliente. Args: (duration: number)
-	ActivateDoubleJump = getOrCreateRemote(eventsFolder, "ActivateDoubleJump"),
-
-	-- =========================================================================
-	-- 🏃 ESCAPE (Client → Server y Server → Client)
-	-- =========================================================================
-
-	--- Server → Client: Notificar al jugador que escapó.
-	PlayerEscaped = getOrCreateRemote(eventsFolder, "PlayerEscaped"),
-
-	-- =========================================================================
-	-- 💀 EJECUCIÓN (Server → Client)
-	-- =========================================================================
-
-	--- Server → Client: Iniciar animación de kill execution.
-	--- Args: (role: "Killer"|"Survivor", killerId: string, victimName: string?, duration: number)
-	KillExecution = getOrCreateRemote(eventsFolder, "KillExecution"),
-
-	-- =========================================================================
-	-- 📦 INVENTARIO (Client ↔ Server)
-	-- =========================================================================
-
-	--- Client → Server: Cambiar personaje seleccionado. Args: (role: string, characterId: string)
-	SelectCharacter = getOrCreateRemote(eventsFolder, "SelectCharacter"),
-
-	--- Server → Client: Enviar selección guardada al conectarse.
-	LoadSelection = getOrCreateRemote(eventsFolder, "LoadSelection"),
-
-	-- =========================================================================
-	-- 📊 ESTADÍSTICAS (Server → Client)
-	-- =========================================================================
-
-	--- Server → Client: Enviar stats al fin de partida.
-	DisplayStats = getOrCreateRemote(eventsFolder, "DisplayStats"),
-
-	-- =========================================================================
-	-- 🔗 BINDABLE EVENTS (Server → Server, sin cruzar la red)
-	-- =========================================================================
-
-	--- Disparado por MusicManagerService cuando termina la música LMS.
-	LMSTimeout = getOrCreateBindable("LMSTimeout"),
+    -- Bindables (Server → Server)
+    LMSTimeout = getOrCreateBindable("LMSTimeout"),
+    -- Debug API
+    DebugSetTime   = getOrCreateRemote(eventsFolder, "DebugSetTime"),
+    DebugSkipPhase = getOrCreateRemote(eventsFolder, "DebugSkipPhase"),
 }
 
 return RemoteRegistry

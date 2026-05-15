@@ -1,6 +1,5 @@
 -- =============================================================================
 -- WorldService.lua
--- Ubicación: src/ServerScriptService/Services/WorldService.lua
 -- =============================================================================
 
 local TweenService      = game:GetService("TweenService")
@@ -13,31 +12,70 @@ local WorldService = {}
 -- Estado interno
 -- =============================================================================
 
--- Referencia al mapa instanciado actualmente. Solo existe durante PLAYING/LAST_MAN.
 local _activeMapInstance: Model? = nil
+local _activeMapName: string?    = nil
 
--- Nombre del mapa activo (para buscarlo en Workspace si hace falta).
-local _activeMapName: string? = nil
+local _debugBillboard: BillboardGui? = nil
+local _activeDummies: {Model} = {}
 
 -- =============================================================================
--- API Pública — Spawns del Lobby (estático, siempre en Workspace)
+-- Privado: Billboard de debug
 -- =============================================================================
 
---- Retorna el CFrame del spawn del Lobby.
---- Ruta real: workspace.Lobby_Prueba_1.LobbySpawn
+local function _spawnDebugBillboard(mapName: string, mapInstance: Model)
+    local pivot = mapInstance:GetPivot()
+    local centerPos = pivot.Position + Vector3.new(0, 20, 0)
+
+    local anchor = Instance.new("Part")
+    anchor.Name      = "DebugMapBillboard"
+    anchor.Size      = Vector3.new(1, 1, 1)
+    anchor.Position  = centerPos
+    anchor.Anchored  = true
+    anchor.CanCollide = false
+    anchor.Transparency = 1
+    anchor.Parent = workspace
+
+    local billboard = Instance.new("BillboardGui", anchor)
+    billboard.Size          = UDim2.new(0, 380, 0, 80)
+    billboard.StudsOffset   = Vector3.new(0, 0, 0)
+    billboard.AlwaysOnTop   = true
+    billboard.LightInfluence = 0
+
+    local bg = Instance.new("Frame", billboard)
+    bg.Size = UDim2.new(1, 0, 1, 0)
+    bg.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
+    bg.BackgroundTransparency = 0.25
+    bg.BorderSizePixel = 0
+    Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 10)
+
+    local label = Instance.new("TextLabel", bg)
+    label.Size = UDim2.new(1, -20, 1, 0)
+    label.Position = UDim2.new(0, 10, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 22
+    label.TextColor3 = Color3.fromRGB(80, 255, 160)
+    label.TextXAlignment = Enum.TextXAlignment.Center
+    label.TextYAlignment = Enum.TextYAlignment.Center
+    label.Text = "🗺️  Renderizado: " .. mapName
+
+    _debugBillboard = billboard
+    print(string.format("🗺️ [WorldService] Billboard de debug activo: '%s'", mapName))
+end
+
+-- =============================================================================
+-- API Pública — Spawns del Lobby
+-- =============================================================================
+
 function WorldService.getLobbySpawnCFrame(): CFrame
     local lobby = workspace:FindFirstChild("Lobby_Prueba_1")
     if not lobby then
-        warn("[WorldService] 'Lobby_Prueba_1' no encontrado en Workspace. Usando fallback.")
         return CFrame.new(0, 5, 0)
     end
-
     local spawnPart = lobby:FindFirstChild("LobbySpawn")
     if not spawnPart or not spawnPart:IsA("BasePart") then
-        warn("[WorldService] 'LobbySpawn' no encontrado dentro de Lobby_Prueba_1. Usando fallback.")
         return CFrame.new(0, 5, 0)
     end
-
     return spawnPart.CFrame
 end
 
@@ -45,50 +83,36 @@ end
 -- API Pública — Spawns del Mapa Dinámico
 -- =============================================================================
 
---- Retorna el CFrame del spawn del Killer en el mapa activo.
---- Ruta real: workspace.<mapName>.KillerSpawn
 function WorldService.getKillerSpawnCFrame(): CFrame
     local map = _activeMapInstance
     if not map or not map.Parent then
-        warn("[WorldService] No hay mapa activo al buscar KillerSpawn.")
         return CFrame.new(0, 10, 0)
     end
-
-    local spawnPart = map:FindFirstChild("KillerSpawn")
+    -- Casting explícito (:: Model) para callar el error Luau1032
+    local spawnPart = (map :: Model):FindFirstChild("KillerSpawn")
     if not spawnPart or not spawnPart:IsA("BasePart") then
-        warn("[WorldService] 'KillerSpawn' no encontrado en el mapa activo. Usando fallback.")
         return CFrame.new(0, 10, 0)
     end
-
     return spawnPart.CFrame
 end
 
---- Retorna todos los BaseParts de SurvivorSpawns del mapa activo.
---- Ruta real: workspace.<mapName>.SurvivorSpawns.Spawn1 ... SpawnN
 function WorldService.getSurvivorSpawnParts(): {BasePart}
     local map = _activeMapInstance
     if not map or not map.Parent then
-        warn("[WorldService] No hay mapa activo al buscar SurvivorSpawns.")
         return {}
     end
-
-    local folder = map:FindFirstChild("SurvivorSpawns")
+    
+    local folder = (map :: Model):FindFirstChild("SurvivorSpawns")
     if not folder then
-        warn("[WorldService] 'SurvivorSpawns' no encontrado en el mapa activo.")
         return {}
     end
-
+    
     local result: {BasePart} = {}
     for _, child in ipairs(folder:GetChildren()) do
         if child:IsA("BasePart") then
             table.insert(result, child)
         end
     end
-
-    if #result == 0 then
-        warn("[WorldService] SurvivorSpawns no contiene BaseParts.")
-    end
-
     return result
 end
 
@@ -96,46 +120,163 @@ end
 -- API Pública — Gestión de Mapas
 -- =============================================================================
 
---- Clona el mapa desde ReplicatedStorage y lo instancia en Workspace.
---- Ruta fuente: ReplicatedStorage.Assets.Maps.<mapName>
-function WorldService.loadMap(mapName: string)
-    -- Descargar el mapa anterior si existe
-    WorldService.unloadMap()
+function WorldService.loadRandomMap()
+    local pool = GameConstants.Maps.Pool
+    if not pool or #pool == 0 then return end
 
     local mapsFolder = ReplicatedStorage:FindFirstChild("Assets")
         and ReplicatedStorage.Assets:FindFirstChild("Maps")
 
-    if not mapsFolder then
-        warn("[WorldService] Carpeta 'ReplicatedStorage/Assets/Maps' no encontrada.")
-        return
+    if not mapsFolder then return end
+
+    local shuffled = table.clone(pool)
+    for i = #shuffled, 2, -1 do
+        local j = math.random(1, i)
+        shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
     end
+
+    local chosenName: string? = nil
+    for _, candidate in ipairs(shuffled) do
+        if mapsFolder:FindFirstChild(candidate) then
+            chosenName = candidate
+            break
+        end
+    end
+
+    if not chosenName then return end
+
+    print(string.format("🎲 [WorldService] Pool=%s → Elegido: '%s'", table.concat(shuffled, ", "), chosenName))
+    WorldService.loadMap(chosenName)
+end
+
+function WorldService.loadMap(mapName: string)
+    WorldService.unloadMap()
+
+    local mapsFolder = ReplicatedStorage:FindFirstChild("Assets")
+        and ReplicatedStorage.Assets:FindFirstChild("Maps")
+    if not mapsFolder then return end
 
     local template = mapsFolder:FindFirstChild(mapName)
-    if not template then
-        warn("[WorldService] Mapa '" .. mapName .. "' no encontrado en Assets/Maps.")
-        return
-    end
+    if not template then return end
 
-    _activeMapInstance = template:Clone()
-    _activeMapInstance.Parent = workspace
+    -- Asignación local segura para evitar el error de tipado nulo
+    local newMap = template:Clone() :: Model
+    newMap.Parent = workspace
+    
+    _activeMapInstance = newMap
     _activeMapName = mapName
 
+    _spawnDebugBillboard(mapName, newMap)
     print("🗺️ [WorldService] Mapa cargado: " .. mapName)
 end
 
---- Destruye el mapa activo y limpia la referencia.
 function WorldService.unloadMap()
+    WorldService.destroyTestDummies()
+
+    if _debugBillboard and _debugBillboard.Parent then
+        (_debugBillboard.Parent :: Instance):Destroy()
+    end
+    _debugBillboard = nil
+
     if _activeMapInstance then
-        _activeMapInstance:Destroy()
+        (_activeMapInstance :: Model):Destroy()
         _activeMapInstance = nil
         _activeMapName = nil
         print("🗺️ [WorldService] Mapa descargado.")
     end
 end
 
---- Retorna la instancia del mapa activo (puede ser nil si no hay partida).
 function WorldService.getActiveMap(): Model?
     return _activeMapInstance
+end
+
+function WorldService.getActiveMapName(): string?
+    return _activeMapName
+end
+
+-- =============================================================================
+-- API Pública — Test Dummies
+-- =============================================================================
+
+function WorldService.spawnTestDummies()
+    local count = GameConstants.Maps.DEBUG_DUMMY_COUNT
+    if count <= 0 then return end
+
+    local killerCF = WorldService.getKillerSpawnCFrame()
+
+    for i = 1, count do
+        local dummy = Instance.new("Model")
+        dummy.Name  = "TestDummy_" .. i
+
+        local root = Instance.new("Part")
+        root.Name     = "HumanoidRootPart"
+        root.Size     = Vector3.new(2, 2, 1)
+        root.Position = killerCF.Position + Vector3.new(math.random(-6, 6), 3, math.random(4, 10))
+        root.BrickColor = BrickColor.new("Bright red")
+        root.Parent = dummy
+
+        local head = Instance.new("Part")
+        head.Name   = "Head"
+        head.Size   = Vector3.new(2, 1, 1)
+        head.Position = root.Position + Vector3.new(0, 1.5, 0)
+        head.BrickColor = BrickColor.new("Nougat")
+        head.Parent = dummy
+
+        local torso = Instance.new("Part")
+        torso.Name   = "Torso"
+        torso.Size   = Vector3.new(2, 2, 1)
+        torso.Position = root.Position
+        torso.BrickColor = BrickColor.new("Bright red")
+        torso.Parent = dummy
+
+        local hum = Instance.new("Humanoid")
+        hum.MaxHealth  = GameConstants.Match.BOT_HEALTH
+        hum.Health     = GameConstants.Match.BOT_HEALTH
+        hum.WalkSpeed  = 0
+        hum.JumpPower  = 0
+        hum.Parent = dummy
+
+        local tag = Instance.new("StringValue")
+        tag.Name   = "SurvivorID"
+        tag.Value  = "GONZACARBON"
+        tag.Parent = dummy
+
+        local bbGui = Instance.new("BillboardGui", head)
+        bbGui.Size        = UDim2.new(0, 140, 0, 30)
+        bbGui.StudsOffset = Vector3.new(0, 2, 0)
+        bbGui.AlwaysOnTop = false
+
+        local hpLabel = Instance.new("TextLabel", bbGui)
+        hpLabel.Size = UDim2.new(1, 0, 1, 0)
+        hpLabel.BackgroundTransparency = 1
+        hpLabel.Font = Enum.Font.GothamBold
+        hpLabel.TextSize = 16
+        hpLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+        hpLabel.Text = "Dummy " .. i .. " | HP: " .. GameConstants.Match.BOT_HEALTH
+
+        hum.HealthChanged:Connect(function(newHp)
+            if hpLabel.Parent then
+                hpLabel.Text = string.format("Dummy %d | HP: %.0f", i, newHp)
+                if newHp <= 0 then
+                    hpLabel.Text = "Dummy " .. i .. " | MUERTO"
+                    hpLabel.TextColor3 = Color3.fromRGB(120, 120, 120)
+                end
+            end
+        end)
+
+        dummy.PrimaryPart = root
+        dummy.Parent = workspace
+        table.insert(_activeDummies, dummy)
+    end
+end
+
+function WorldService.destroyTestDummies()
+    for _, dummy in ipairs(_activeDummies) do
+        if dummy and dummy.Parent then
+            dummy:Destroy()
+        end
+    end
+    table.clear(_activeDummies)
 end
 
 -- =============================================================================
@@ -165,20 +306,16 @@ local LightingPresets = {
 
 function WorldService.applyLightingPreset(presetName: string, duration: number?)
     local preset = LightingPresets[presetName]
-    if not preset then
-        warn("[WorldService] Preset desconocido: '" .. presetName .. "'")
-        return
-    end
-
+    if not preset then return end
+    
     local lighting  = game:GetService("Lighting")
     local tweenInfo = TweenInfo.new(duration or 3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-
     TweenService:Create(lighting, tweenInfo, {
         FogEnd         = preset.FogEnd,
         Brightness     = preset.Brightness,
         OutdoorAmbient = preset.OutdoorAmbient,
     }):Play()
-
+    
     local cc = lighting:FindFirstChildOfClass("ColorCorrectionEffect")
     if cc then
         TweenService:Create(cc, tweenInfo, { TintColor = preset.tint }):Play()
@@ -190,13 +327,11 @@ end
 -- =============================================================================
 
 function WorldService.Start()
-    -- Validar que el Lobby estático existe al arrancar
     local lobby = workspace:FindFirstChild("Lobby_Prueba_1")
     if lobby then
         print("🌍 [WorldService] Lobby_Prueba_1 encontrado. Listo.")
     else
-        warn("[WorldService] ⚠️ 'Lobby_Prueba_1' no está en Workspace. " ..
-             "Los jugadores usarán posición de emergencia hasta que el artista lo coloque.")
+        warn("[WorldService] ⚠️ 'Lobby_Prueba_1' no está en Workspace.")
     end
 end
 

@@ -80,4 +80,14 @@ function TimeManagerService.Start()
 	print("⏳ [TimeManager] Iniciado.")
 end
 
+function TimeManagerService.setTime(seconds: number)
+    if _isRunning then
+        _remaining = math.max(0, seconds)
+        print(string.format("🛠️ [TimeManager] Tiempo forzado a %ds (Debug)", _remaining))
+        ServerEventBus.TimeUpdated:Fire(_remaining)
+        RemoteRegistry.TimeUpdated:FireAllClients(_remaining)
+    end
+end
+
 return TimeManagerService
+

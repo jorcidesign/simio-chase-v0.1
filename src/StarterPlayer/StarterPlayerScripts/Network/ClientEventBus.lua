@@ -11,6 +11,7 @@ local ClientEventBus = {
 
 	-- ✅ Traduce el tick de tiempo del servidor a una señal local
 	TimeUpdated = Signal.new(),
+	RageUpdated = Signal.new(),   -- Args: (amount: number) — rage ganada por Poro
 }
 
 -- Puente: servidor → cliente para estado de partida
@@ -21,6 +22,11 @@ end)
 -- ✅ Puente: servidor → cliente para el timer
 RemoteRegistry.TimeUpdated.OnClientEvent:Connect(function(remaining)
 	ClientEventBus.TimeUpdated:Fire(remaining)
+end)
+
+-- Y al final, el puente del servidor:
+RemoteRegistry.RageUpdated.OnClientEvent:Connect(function(amount)
+    ClientEventBus.RageUpdated:Fire(amount)
 end)
 
 return ClientEventBus

@@ -1,31 +1,39 @@
 -- =============================================================================
 -- GameState.lua
--- Ubicación: src/shared/enums/GameState.lua
+-- Ubicación: src/ReplicatedStorage/Enums/GameState.lua
 --
--- Enum que define todos los estados posibles del juego.
--- Elimina el uso de strings mágicos dispersos en el código.
+-- SPRINT 2 — Sin cambios de estados. El flujo ESCAPE ya cubría el overtime.
+-- Se documenta aquí el mapping real según el GDD:
 --
--- Principio SOLID: Open/Closed — agregar un estado nuevo no modifica
---                  la lógica existente, solo extiende esta tabla.
+--   PLAYING   → LAST_MAN (1 survivor vivo, sin escapados)
+--   PLAYING   → ESCAPE   (timer <= EXIT_OPEN_THRESHOLD)
+--   LAST_MAN  → ESCAPE   (timer <= EXIT_OPEN_THRESHOLD)
+--   ESCAPE    → ENDING   (todos muertos/escapados o timer = 0)
+--
+-- El estado ESCAPE ES el "overtime" descrito en el GDD.
+-- No se añade un estado OVERTIME separado para no romper las transiciones
+-- válidas ya establecidas.
 -- =============================================================================
 
---- @enum GameState
 local GameState = {
-	-- Fase pre-partida
-	WAITING      = "WAITING",       -- Esperando jugadores mínimos
-	LOBBY        = "LOBBY",         -- Countdown de lobby
-	SELECTING    = "SELECTING",     -- Asignando roles y spawneando
+    WAITING      = "WAITING",
+    LOBBY        = "LOBBY",
+    SELECTING    = "SELECTING",
+    LOADING      = "LOADING",
 
-	-- Fases de partida activa
-	PLAYING      = "PLAYING",       -- Juego en progreso normal
-	CHASE        = "CHASE",         -- Persecución activa (música de chase)
-	LAST_MAN     = "LAST_MAN",      -- Un solo superviviente (LMS)
-	ESCAPE       = "ESCAPE",        -- Puerta abierta, fase de escape
+    PLAYING      = "PLAYING",
+    CHASE        = "CHASE",
 
-	-- Fin de partida
-	ENDING       = "ENDING",        -- Mostrando resultados
-	INTERMISSION = "INTERMISSION",  -- Entre partidas
+    -- Último survivor vivo, sin haber escapado. Recibe buff de +60 HP.
+    LAST_MAN     = "LAST_MAN",
+
+    -- Puerta abierta. Fase de escape (overtime 20s).
+    -- Entra desde PLAYING o LAST_MAN cuando timer <= EXIT_OPEN_THRESHOLD.
+    ESCAPE       = "ESCAPE",
+
+    ENDING       = "ENDING",
+    STATS        = "STATS",       -- ✅ NUEVO: Fase de estadísticas
+    INTERMISSION = "INTERMISSION",
 }
 
--- Hace la tabla inmutable para evitar mutaciones accidentales en runtime
 return table.freeze(GameState)

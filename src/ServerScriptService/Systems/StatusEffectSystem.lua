@@ -34,21 +34,20 @@ local activeEffects: {[Model]: {[string]: {level: number, endTime: number, clean
 -- ---------------------------------------------------------------------------
 
 local function getBaseSpeed(char: Model): number
-	local killerTag   = char:FindFirstChild("KillerID")
-	local survivorTag = char:FindFirstChild("SurvivorID")
+    local killerTag   = char:FindFirstChild("KillerID")
+    local survivorTag = char:FindFirstChild("SurvivorID")
 
-	if killerTag then
-		-- Importar dinámicamente para evitar ciclos
-		local CharacterRegistry = require(script.Parent.Parent.data.CharacterRegistry)
-		local config = CharacterRegistry.getKiller(killerTag.Value)
-		return config and config.BaseSpeed or 20
-	elseif survivorTag then
-		local CharacterRegistry = require(script.Parent.Parent.data.CharacterRegistry)
-		local config = CharacterRegistry.getSurvivor(survivorTag.Value)
-		return config and config.WalkSpeed or GameConstants.Movement.DEFAULT_WALK_SPEED
-	end
+    if killerTag then
+        local CharacterRegistry = require(ServerScriptService.Data.CharacterRegistry)
+        local config = CharacterRegistry.getKiller(killerTag.Value)
+        return config and config.BaseSpeed or 20
+    elseif survivorTag then
+        local CharacterRegistry = require(ServerScriptService.Data.CharacterRegistry)
+        local config = CharacterRegistry.getSurvivor(survivorTag.Value)
+        return config and config.WalkSpeed or GameConstants.Movement.DEFAULT_WALK_SPEED
+    end
 
-	return GameConstants.Movement.DEFAULT_WALK_SPEED
+    return GameConstants.Movement.DEFAULT_WALK_SPEED
 end
 
 local function ensureEntry(char: Model)

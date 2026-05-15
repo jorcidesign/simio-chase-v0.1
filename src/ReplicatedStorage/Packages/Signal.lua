@@ -11,16 +11,22 @@
 
 -- Tipos Luau para autocompletado y seguridad de tipos
 export type Connection = {
-	Disconnect: (self: Connection) -> (),
-	Connected: boolean,
+    Disconnect: (self: Connection) -> (),
+    Connected: boolean,
+    -- Campos internos expuestos en el tipo para evitar errores del typechecker
+    _signal: any,
+    _handler: (...any) -> (),
 }
 
 export type Signal<T...> = {
-	Connect: (self: Signal<T...>, handler: (T...) -> ()) -> Connection,
-	Once: (self: Signal<T...>, handler: (T...) -> ()) -> Connection,
-	Fire: (self: Signal<T...>, T...) -> (),
-	Wait: (self: Signal<T...>) -> T...,
-	Destroy: (self: Signal<T...>) -> (),
+    Connect: (self: Signal<T...>, handler: (T...) -> ()) -> Connection,
+    Once: (self: Signal<T...>, handler: (T...) -> ()) -> Connection,
+    Fire: (self: Signal<T...>, T...) -> (),
+    Wait: (self: Signal<T...>) -> T...,
+    Destroy: (self: Signal<T...>) -> (),
+    -- Campos internos expuestos en el tipo para evitar errores del typechecker
+    _connections: {Connection},
+    _thread: thread?,
 }
 
 -- ---------------------------------------------------------------------------
@@ -30,24 +36,24 @@ local Connection = {}
 Connection.__index = Connection
 
 function Connection.new(signal: any, handler: (...any) -> ()): Connection
-	return setmetatable({
-		_signal  = signal,
-		_handler = handler,
-		Connected = true,
-	}, Connection)
+    return setmetatable({
+        _signal  = signal,
+        _handler = handler,
+        Connected = true,
+    }, Connection) :: any -- El casteo previene discrepancias estrictas de OOP
 end
 
 function Connection:Disconnect()
-	if not self.Connected then return end
-	self.Connected = false
+    if not self.Connected then return end
+    self.Connected = false
 
-	local connections = self._signal._connections
-	for i, conn in ipairs(connections) do
-		if conn == self then
-			table.remove(connections, i)
-			break
-		end
-	end
+    local connections = self._signal._connections
+    for i, conn in ipairs(connections) do
+        if conn == self then
+            table.remove(connections, i)
+            break
+        end
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -58,69 +64,71 @@ Signal.__index = Signal
 
 --- Constructor. Crea un nuevo Signal vacío.
 function Signal.new(): Signal<...any>
-	return setmetatable({
-		_connections = {} :: {Connection},
-		_thread      = nil :: thread?,
-	}, Signal)
+    return setmetatable({
+        _connections = {} :: {Connection},
+        _thread      = nil :: thread?,
+    }, Signal) :: any -- El casteo previene discrepancias estrictas de OOP
 end
 
 --- Conecta un handler que se ejecuta cada vez que se dispara el Signal.
 --- @return Connection  Guarda la conexión para desconectarla posteriormente.
 function Signal:Connect(handler: (...any) -> ()): Connection
-	assert(type(handler) == "function", "[Signal] Connect espera una función")
+    assert(type(handler) == "function", "[Signal] Connect espera una función")
 
-	local conn = Connection.new(self, handler)
-	table.insert(self._connections, conn)
-	return conn
+    local conn = Connection.new(self, handler)
+    table.insert(self._connections, conn)
+    return conn
 end
 
 --- Conecta un handler que se ejecuta UNA SOLA VEZ y se desconecta solo.
 function Signal:Once(handler: (...any) -> ()): Connection
-	local conn
-	conn = self:Connect(function(...)
-		conn:Disconnect()
-		handler(...)
-	end)
-	return conn
+    local conn: Connection
+    conn = self:Connect(function(...)
+        if conn then
+            conn:Disconnect()
+        end
+        handler(...)
+    end)
+    return conn
 end
 
 --- Dispara el Signal, ejecutando todos los handlers conectados.
 --- SEGURO: los errores en handlers individuales no rompen los demás.
 function Signal:Fire(...: any)
-	-- Snapshot para evitar mutaciones durante la iteración
-	local snapshot = table.clone(self._connections)
+    -- Snapshot para evitar mutaciones durante la iteración
+    local snapshot = table.clone(self._connections)
 
-	for _, conn in ipairs(snapshot) do
-		if conn.Connected then
-			local ok, err = pcall(conn._handler, ...)
-			if not ok then
-				warn(string.format("[Signal] Error en handler: %s", tostring(err)))
-			end
-		end
-	end
+    for _, conn in ipairs(snapshot) do
+        if conn.Connected then
+            local ok, err = pcall(conn._handler, ...)
+            if not ok then
+                warn(string.format("[Signal] Error en handler: %s", tostring(err)))
+            end
+        end
+    end
 
-	-- Despertar cualquier corrutina esperando con :Wait()
-	if self._thread then
-		local thread = self._thread
-		self._thread = nil
-		task.spawn(thread, ...)
-	end
+    -- Despertar cualquier corrutina esperando con :Wait()
+    if self._thread then
+        local thread = self._thread
+        self._thread = nil
+        task.spawn(thread, ...)
+    end
 end
 
 --- Suspende la corrutina actual hasta que el Signal sea disparado.
 --- @return ... Los argumentos con que fue disparado el Signal.
 function Signal:Wait(): ...any
-	self._thread = coroutine.running()
-	return coroutine.yield()
+    self._thread = coroutine.running()
+    return coroutine.yield()
 end
 
 --- Destruye el Signal y limpia todas las conexiones. Llamar al hacer cleanup.
 function Signal:Destroy()
-	for _, conn in ipairs(self._connections) do
-		conn.Connected = false
-	end
-	table.clear(self._connections)
-	self._thread = nil
+    for _, conn in ipairs(self._connections) do
+        conn.Connected = false
+    end
+    table.clear(self._connections)
+    self._thread = nil
 end
 
 return Signal
