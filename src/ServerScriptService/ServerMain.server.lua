@@ -7,6 +7,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Services = ServerScriptService.Services
 local Systems  = ServerScriptService.Systems
 
+-- IMPORTACIÓN DE SERVICIOS Y SISTEMAS (comentario testeado)
 local PlayerDataService         = require(Services.PlayerDataService)
 local TimeManagerService        = require(Services.TimeManagerService)
 local WorldService              = require(Services.WorldService)
